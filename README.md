@@ -45,7 +45,8 @@
 1. **装插件**：把 `astrbot_plugin_diet/` 整个目录放到 AstrBot 的 `data/plugins/` 下并重载插件。
 2. **配插件**：在 WebUI 插件配置里填写 `base_url`、`model`、`hmac_secret`（签名密钥，自己定一个随机串）。
 3. **建 API Key**：WebUI → 设置 → API Key，权限**勾选 `plugin`**，复制 `abk_...`。
-4. **装 APP**：用 GitHub Actions 产物或自行编译的 APK，填入 `服务器地址 / API Key / 签名密钥`，然后开拍。
+   > 这是 **AstrBot 自己的钥匙**，不是 OpenAI 的 key。调用模型的 key 填在插件配置里。
+4. **装 APP**：用 GitHub Actions 产物或自行编译的 APK，填入 `服务器地址 / AstrBot API Key / 签名密钥`，然后开拍。
 
 ## 使用
 
@@ -160,24 +161,24 @@ BUILD SUCCESSFUL in 34s
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-1.0.1-release.apk`（12.24 MB） |
-| 包名 / 版本 | `com.dietcam.app` v1.0.1 (versionCode 2) |
+| 产物 | `dist/DietCam-1.0.2-release.apk`（12.24 MB） |
+| 包名 / 版本 | `com.dietcam.app` v1.0.2 (versionCode 3) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
 | 签名方案 | APK Signature Scheme v2 + v3 均已校验通过 |
 | 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（跨构建稳定） |
-| SHA-256 | `AEEE3F3BE390CDD1FBCD40D73884A441A69482BE85CAD158FA6D1EA04AD1FFAD` |
+| SHA-256 | `932C85F4443505F2AB2A68341CE5D65871801489CAF1BADC48AB5485D5E8C00F` |
 
-**升级路径实测** —— 1.0.1（新增文字输入）由 `bump_version.py` 递增后构建，逐一核对升级三要素：
+**升级路径实测** —— 1.0.2（文字输入 + 连接报错提示）由 `bump_version.py` 递增后构建：
 
-| | 1.0.0 | 1.0.1 |
+| | 1.0.0 | 1.0.2 |
 | --- | --- | --- |
 | applicationId | `com.dietcam.app` | `com.dietcam.app` ✅ 一致 |
-| versionCode | 1 | 2 ✅ 更大 |
+| versionCode | 1 | 3 ✅ 更大 |
 | 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d76d49a7…` ✅ 完全一致 |
 
-三个条件同时满足，因此 1.0.1 会被系统识别为**升级**而不是新装。
+三个条件同时满足，因此新包会被系统识别为**升级**而不是新装。
 
 工具链：JDK 21 + Gradle 8.11.1 + AGP 8.7.3 + Kotlin 2.1.0 + Compose BOM 2024.12.01。

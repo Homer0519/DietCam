@@ -240,11 +240,17 @@ fun DietCameraScreen(vm: DietViewModel) {
                 },
             )
 
-            is DietState.Failed -> ErrorCard(
-                modifier = Modifier.align(Alignment.BottomCenter),
-                message = current.message,
-                onDismiss = { vm.reset() },
-            )
+            // 设置对话框开着时，错误改在它【上面】弹出，否则会被挡住看不见
+            is DietState.Failed -> if (!showSettings) {
+                ErrorCard(
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                    message = current.message,
+                    onDismiss = { vm.reset() },
+                )
+            }
+
+            // 连接测试结果统一走下方的结果弹窗
+            is DietState.Notice -> Unit
         }
 
         if (showSettings) {
@@ -256,8 +262,28 @@ fun DietCameraScreen(vm: DietViewModel) {
                     showSettings = false
                 },
                 onTest = { vm.testConnection() },
+                testing = state is DietState.Uploading,
                 configVersion = configVersion,
             )
+        }
+
+        // ── 结果弹窗：必须写在设置对话框之后，才能叠在它上面 ─────────────
+        when (val current = state) {
+            is DietState.Notice -> ResultDialog(
+                title = current.title,
+                message = current.message,
+                onDismiss = { vm.reset() },
+            )
+
+            is DietState.Failed -> if (showSettings) {
+                ResultDialog(
+                    title = "出问题了",
+                    message = current.message,
+                    onDismiss = { vm.reset() },
+                )
+            }
+
+            else -> Unit
         }
     }
 }
@@ -443,6 +469,36 @@ private fun ResultCard(
     }
 }
 
+/** 结果弹窗：叠在设置对话框之上，保证点完「测试连接」一定看得见。 */
+@Composable
+private fun ResultDialog(
+    title: String,
+    message: String,
+    onDismiss: () -> Unit,
+) {
+    val ok = title.contains("成功")
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                title,
+                color = if (ok) Accent else Color(0xFFFFB4AB),
+                fontWeight = FontWeight.Bold,
+            )
+        },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(message, fontSize = 13.sp, lineHeight = 20.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text(if (ok) "好，开始用" else "知道了", color = Accent)
+            }
+        },
+    )
+}
+
 @Composable
 private fun ErrorCard(
     modifier: Modifier = Modifier,
@@ -476,6 +532,7 @@ private fun SettingsDialog(
     onDismiss: () -> Unit,
     onSave: (String, String, String) -> Unit,
     onTest: () -> Unit,
+    testing: Boolean,
     configVersion: Int,
 ) {
     var baseUrl by remember(configVersion) { mutableStateOf(current.baseUrl) }
@@ -499,7 +556,7 @@ private fun SettingsDialog(
                 OutlinedTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
-                    label = { Text("OpenAPI Key") },
+                    label = { Text("AstrBot API Key") },
                     placeholder = { Text("abk_...") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -508,18 +565,34 @@ private fun SettingsDialog(
                 OutlinedTextField(
                     value = secret,
                     onValueChange = { secret = it },
-                    label = { Text("签名密钥") },
+                    label = { Text("签名密钥 (hmac_secret)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(12.dp))
                 Text(
-                    "签名密钥需与 AstrBot 插件配置里的 hmac_secret 完全一致；API Key 需勾选 plugin 权限。",
+                    "① AstrBot API Key：AstrBot 自己的钥匙，在网页端\n" +
+                        "   设置 → API Key 新建，权限勾 plugin，形如 abk_xxx\n" +
+                        "   ⚠️ 不是 OpenAI / 模型的 key\n\n" +
+                        "② 签名密钥：与插件配置里的 hmac_secret 填一样的随机串\n\n" +
+                        "一个是「能不能进 AstrBot 的门」，\n一个是「插件认不认你」。",
                     fontSize = 12.sp,
                     color = Muted,
                 )
                 Spacer(Modifier.height(12.dp))
-                TextButton(onClick = onTest) { Text("测试连接", color = Accent) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onTest, enabled = !testing) {
+                        Text(if (testing) "正在连接…" else "测试连接", color = if (testing) Muted else Accent)
+                    }
+                    if (testing) {
+                        Spacer(Modifier.width(8.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Accent,
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                }
             }
         },
         confirmButton = {

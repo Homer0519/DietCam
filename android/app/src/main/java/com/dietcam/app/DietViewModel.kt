@@ -36,6 +36,9 @@ sealed interface DietState {
     data object Uploading : DietState
     data class Success(val result: MealResult, val at: String) : DietState
     data class Failed(val message: String, val at: String) : DietState
+
+    /** 中性提示（连接测试结果、配置说明等），用普通样式展示而非报错样式。 */
+    data class Notice(val title: String, val message: String) : DietState
 }
 
 class DietViewModel(app: Application) : AndroidViewModel(app) {
@@ -65,21 +68,29 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun testConnection() {
         val current = store.snapshot()
-        if (current.baseUrl.isBlank()) {
-            _state.value = DietState.Failed("请先填写服务器地址", now())
+        val missing = mutableListOf<String>()
+        if (current.baseUrl.isBlank()) missing.add("服务器地址")
+        if (current.apiKey.isBlank()) missing.add("AstrBot API Key")
+        if (current.secret.isBlank()) missing.add("签名密钥")
+        if (missing.isNotEmpty()) {
+            _state.value = DietState.Notice(
+                "还差几项没填",
+                "请先填写：" + missing.joinToString("、"),
+            )
             return
         }
         _state.value = DietState.Uploading
         viewModelScope.launch {
             try {
                 val json = DietApi(current).health()
-                _state.value = DietState.Failed(
-                    "连接成功 ✅ 插件版本 " + json.optString("version", "?") + "，数据目录 " +
-                        json.optString("data_dir", "?"),
-                    now(),
+                _state.value = DietState.Notice(
+                    "连接成功 ✅",
+                    "插件版本：" + json.optString("version", "?") + "\n" +
+                        "数据目录：" + json.optString("data_dir", "?") + "\n\n" +
+                        "两把钥匙都对上了，可以开始记录。",
                 )
             } catch (e: Exception) {
-                _state.value = DietState.Failed("连接失败：" + (e.message ?: e.toString()), now())
+                _state.value = DietState.Notice("连接失败", DietApi.friendlyMessage(e))
             }
         }
     }
@@ -101,7 +112,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
                 val json = DietApi(current).analyzeText(desc)
                 _state.value = DietState.Success(parse(json), now())
             } catch (e: Exception) {
-                _state.value = DietState.Failed(e.message ?: "未知错误", now())
+                _state.value = DietState.Failed(DietApi.friendlyMessage(e), now())
             }
         }
     }
@@ -118,7 +129,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
                 val json = DietApi(current).analyze(file, note)
                 _state.value = DietState.Success(parse(json), now())
             } catch (e: Exception) {
-                _state.value = DietState.Failed(e.message ?: "未知错误", now())
+                _state.value = DietState.Failed(DietApi.friendlyMessage(e), now())
             } finally {
                 runCatching { file.delete() }
             }
