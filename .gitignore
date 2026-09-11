@@ -1,0 +1,27 @@
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+*.apk
+*.aab
+captures/
+
+# 本机构建工具链（体积很大，不要提交）
+.toolchain/
+
+# 测试/演示临时数据
+.demo_data/
+.selftest_data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.DS_Store

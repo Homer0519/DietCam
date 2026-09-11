@@ -1,0 +1,71 @@
+{
+  "llm_mode": {
+    "description": "视觉模型接入方式",
+    "type": "string",
+    "options": [
+      "openai_compatible",
+      "astrbot_provider"
+    ],
+    "default": "openai_compatible",
+    "hint": "openai_compatible = 插件自己按 OpenAI 格式请求你的多模态模型；astrbot_provider = 复用 AstrBot 里已配置的模型提供商（需支持图片输入）"
+  },
+  "base_url": {
+    "description": "OpenAI 兼容接口地址",
+    "type": "string",
+    "default": "http://127.0.0.1:8000/v1",
+    "hint": "结尾到 /v1 即可，插件会自动拼接 /chat/completions"
+  },
+  "api_key": {
+    "description": "接口 API Key（本地模型可留空）",
+    "type": "string",
+    "default": ""
+  },
+  "model": {
+    "description": "模型名称",
+    "type": "string",
+    "default": "qwen2.5-vl-7b-instruct"
+  },
+  "extra_headers": {
+    "description": "额外请求头(JSON)",
+    "type": "string",
+    "default": "{}"
+  },
+  "extra_body": {
+    "description": "额外请求体字段(JSON)",
+    "type": "string",
+    "default": "{}"
+  },
+  "astrbot_provider_id": {
+    "description": "AstrBot 提供商 ID（llm_mode=astrbot_provider 时使用）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则使用当前默认提供商；需为支持图片的多模态模型"
+  },
+  "request_timeout": {
+    "description": "模型请求超时(秒)",
+    "type": "int",
+    "default": 120
+  },
+  "hmac_secret": {
+    "description": "APP 上传签名密钥",
+    "type": "string",
+    "default": "change-me-dietcam-secret",
+    "hint": "必须与 APP 端设置里填写的密钥完全一致，用于防止接口被公网滥用"
+  },
+  "timezone_offset_hours": {
+    "description": "时区偏移(小时)",
+    "type": "int",
+    "default": 8
+  },
+  "remember_umo": {
+    "description": "记录最近会话用于主动推送",
+    "type": "bool",
+    "default": true,
+    "hint": "只记录会话标识，不会主动发消息"
+  },
+  "analyze_prompt": {
+    "description": "自定义分析提示词",
+    "type": "text",
+    "default": ""
+  }
+}
