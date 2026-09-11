@@ -34,6 +34,11 @@ class DietApi(private val settings: DietSettings) {
         .readTimeout(180, TimeUnit.SECONDS)
         .build()
 
+    /** 流式请求要能一直读下去，读超时设为不限制。 */
+    private val streamClient: OkHttpClient = client.newBuilder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
+
     private fun token(): String {
         val exp = System.currentTimeMillis() / 1000L + 300L
         return exp.toString() + "." + hmacSha256Hex(settings.secret, exp.toString())
@@ -52,36 +57,168 @@ class DietApi(private val settings: DietSettings) {
         return builder
     }
 
+    private fun jsonBody(obj: JSONObject) =
+        obj.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+
+    // ------------------------------------------------------------- 基础接口
+
     suspend fun health(): JSONObject = withContext(Dispatchers.IO) {
-        execute(newRequest(endpoint("/health")).get().build())
+        executeSync(newRequest(endpoint("/health")).get().build())
+    }
+
+    /** 主页概览：当日合计、每日目标、记录列表。 */
+    suspend fun summary(date: String? = null): JSONObject = withContext(Dispatchers.IO) {
+        val url = if (date.isNullOrBlank()) {
+            endpoint("/summary")
+        } else {
+            endpoint("/summary") + "?date=" + date
+        }
+        executeSync(newRequest(url).get().build())
+    }
+
+    /** 调整每日目标（存在服务端 state.json）。 */
+    suspend fun updateTargets(targets: Map<String, Double>): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+        targets.forEach { (k, v) -> body.put(k, v) }
+        executeSync(newRequest(endpoint("/targets")).post(jsonBody(body)).build())
     }
 
     /** 上传照片做分析；note 会作为补充说明一起交给模型。 */
     suspend fun analyze(file: File, note: String): JSONObject = withContext(Dispatchers.IO) {
+        executeSync(newRequest(endpoint("/analyze")).post(multipart(file, note)).build())
+    }
+
+    /** 纯文字记录：不拍照，直接描述吃了什么。 */
+    suspend fun analyzeText(text: String): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("text", text)
+        executeSync(newRequest(endpoint("/analyze_text")).post(jsonBody(body)).build())
+    }
+
+    /** 取回归档照片的原始字节。 */
+    suspend fun photoBytes(date: String, name: String): ByteArray = withContext(Dispatchers.IO) {
+        val url = endpoint("/photo") + "?date=" + date + "&name=" + name
+        streamClient.newCall(newRequest(url).get().build()).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw DietApiException("取图失败 HTTP " + resp.code, resp.code)
+            }
+            resp.body?.bytes() ?: ByteArray(0)
+        }
+    }
+
+    // --------------------------------------------------------------- 流式
+
+    /**
+     * 流式分析照片。
+     *
+     * 服务端按 SSE 逐步下发模型输出，[onDelta] 会在每收到一段文本时被调用
+     * （运行在 IO 线程，调用方自行保证线程安全）。
+     * 返回最终解析好的 record。
+     */
+    suspend fun analyzeStream(
+        file: File,
+        note: String,
+        onDelta: (String) -> Unit,
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val request = newRequest(endpoint("/analyze_stream")).post(multipart(file, note)).build()
+        try {
+            readSse(request, onDelta)
+        } catch (e: DietApiException) {
+            if (e.serverMessage == NO_STREAM) {
+                // 服务端是旧版插件，退回一次性分析
+                recordOf(executeSync(newRequest(endpoint("/analyze")).post(multipart(file, note)).build()))
+            } else {
+                throw e
+            }
+        }
+    }
+
+    /** 流式分析一段文字描述。 */
+    suspend fun analyzeTextStream(
+        text: String,
+        onDelta: (String) -> Unit,
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("text", text)
+        val request = newRequest(endpoint("/analyze_text_stream")).post(jsonBody(body)).build()
+        try {
+            readSse(request, onDelta)
+        } catch (e: DietApiException) {
+            if (e.serverMessage == NO_STREAM) {
+                recordOf(
+                    executeSync(
+                        newRequest(endpoint("/analyze_text")).post(jsonBody(body)).build()
+                    )
+                )
+            } else {
+                throw e
+            }
+        }
+    }
+
+    /** 服务端返回体里取 record，没有就整体返回。 */
+    private fun recordOf(json: JSONObject): JSONObject =
+        json.optJSONObject("record") ?: json
+
+    private fun multipart(file: File, note: String): MultipartBody {
         val form = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, file.asRequestBody("image/jpeg".toMediaType()))
         if (note.isNotBlank()) {
             form.addFormDataPart("note", note)
         }
-        val request = newRequest(endpoint("/analyze")).post(form.build()).build()
-        execute(request)
+        return form.build()
     }
 
-    /** 纯文字记录：不拍照，直接描述吃了什么。 */
-    suspend fun analyzeText(text: String): JSONObject = withContext(Dispatchers.IO) {
-        val body = JSONObject().put("text", text)
-        val request = newRequest(endpoint("/analyze_text"))
-            .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-        execute(request)
+    /** 读取 SSE 流，直到收到 done 事件。 */
+    private fun readSse(request: Request, onDelta: (String) -> Unit): JSONObject {
+        streamClient.newCall(request).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                val text = resp.body?.string().orEmpty()
+                val serverMsg = try {
+                    JSONObject(text).optString("message")
+                } catch (e: Exception) {
+                    ""
+                }
+                throw DietApiException("HTTP " + resp.code + "：" + text.take(300), resp.code, serverMsg)
+            }
+            val source = resp.body?.source()
+                ?: throw DietApiException("服务器没有返回内容")
+            val contentType = resp.header("Content-Type").orEmpty()
+            if (!contentType.contains("event-stream")) {
+                // 服务端不支持流式（旧版插件），退化为一次性读取
+                throw DietApiException("服务端未启用流式响应", resp.code, NO_STREAM)
+            }
+            while (true) {
+                val line = source.readUtf8Line() ?: break
+                if (!line.startsWith("data:")) continue
+                val payload = line.removePrefix("data:").trim()
+                if (payload.isEmpty()) continue
+                val obj = try {
+                    JSONObject(payload)
+                } catch (e: Exception) {
+                    continue
+                }
+                when (obj.optString("type")) {
+                    "delta" -> onDelta(obj.optString("text"))
+                    "done" -> {
+                        val record = obj.optJSONObject("record")
+                            ?: throw DietApiException("服务端没有返回结果")
+                        return record
+                    }
+                    "error" -> throw DietApiException(
+                        obj.optString("message").ifBlank { "分析失败" }
+                    )
+                }
+            }
+            throw DietApiException("连接中断，没有收到完整结果")
+        }
     }
 
-    private fun execute(request: Request): JSONObject {
+    // ------------------------------------------------------------ 响应处理
+
+    private fun executeSync(request: Request): JSONObject {
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                // AstrBot 和插件都会返回 {"message": "..."} 形式的错误信封
                 val serverMsg = try {
                     JSONObject(text).optString("message")
                 } catch (e: Exception) {
@@ -102,6 +239,9 @@ class DietApi(private val settings: DietSettings) {
     }
 
     companion object {
+        /** 内部标记：服务端不支持流式，调用方应回退到一次性接口。 */
+        const val NO_STREAM = "__NO_STREAM__"
+
         /** 把底层异常翻译成用户能照着排查的中文提示。 */
         fun friendlyMessage(e: Throwable): String {
             val msg = e.message ?: e.toString()
@@ -118,20 +258,18 @@ class DietApi(private val settings: DietSettings) {
 
                 e is DietApiException && e.serverMessage.contains("unauthorized", true) ->
                     "签名密钥不对（插件返回 unauthorized）。\n\n" +
-                        "APP 里的『签名密钥』必须与插件配置里的 hmac_secret 完全一致。\n" +
-                        "注意区分：AstrBot API Key 管的是能不能进门，签名密钥管的是插件认不认你。"
+                        "APP 里的『签名密钥』必须与插件配置里的 hmac_secret 完全一致。"
 
                 e is DietApiException && e.statusCode == 404 ->
                     "地址不对，或插件没加载成功（HTTP 404）。\n\n" +
                         "· 地址应形如 http://你的服务器IP:6185（不要带结尾斜杠）\n" +
-                        "· AstrBot 启动日志里应有『[diet] 已注册 6 个 Web API』"
+                        "· AstrBot 启动日志里应有『[diet] 已注册 N 个 Web API』"
 
                 e is java.net.UnknownHostException ->
                     "找不到这个服务器地址。\n\n检查 IP 有没有写错，以及手机是否联网。"
 
                 e is java.net.ConnectException ->
-                    "连不上服务器。\n\n· 确认 AstrBot 正在运行\n· 确认端口（默认 6185）已放行\n" +
-                        "· 若用 https 请确认证书有效"
+                    "连不上服务器。\n\n· 确认 AstrBot 正在运行\n· 确认端口（默认 6185）已放行"
 
                 e is java.net.SocketTimeoutException ->
                     "连接超时。\n\n检查网络，或确认服务器没有把该端口限制到特定 IP。"

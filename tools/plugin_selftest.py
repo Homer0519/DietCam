@@ -233,7 +233,7 @@ plugin.config.pop("extra_headers", None)
 
 # ================================================================ 9. 端到端：文件上传（回归）
 section("9. 端到端 · 照片上传（线上 bug 的回归测试）")
-check("路由已注册", len(context.routes()) == 6, context.routes())
+check("路由已注册", len(context.routes()) == 10, context.routes())
 patch_analyzer()
 DAY = dt.datetime.now(plugin.tz).strftime("%Y-%m-%d")
 resp = call("/health")
@@ -378,6 +378,158 @@ report = plugin._render_day(DAY)
 check("照片记录用相机图标", "📷" in report, report[:200])
 check("文字记录用书写图标", "✍️" in report, report[:200])
 check("日报包含合计行", "合计" in report)
+
+
+# ================================================================ 15. 主页概要
+
+
+def events_of(suffix, **kw):
+    """调用流式接口并把 SSE 事件全部取出来。"""
+    make_request(**kw)
+    resp = call(suffix)
+    if not isinstance(resp, stub.FakeStreamResponse):
+        raise AssertionError("不是流式响应：%r" % (resp,))
+    return asyncio.run(resp.events())
+
+
+section("15. 端到端 · 主页概要 /summary")
+make_request(query={"date": DAY})
+resp = call("/summary")
+check("/summary 返回 200", resp.status_code == 200, resp.payload)
+check("含 totals", "calories_kcal" in resp.payload.get("totals", {}))
+check("含 targets", set(resp.payload.get("targets", {})) == set(module.DEFAULT_TARGETS), resp.payload.get("targets"))
+check("含 records 列表", isinstance(resp.payload.get("records"), list))
+check("count 与 records 长度一致", resp.payload["count"] == len(resp.payload["records"]))
+check("日期回显正确", resp.payload["date"] == DAY)
+
+make_request(query={"date": "坏日期"})
+resp = call("/summary")
+check("/summary 拒绝非法日期", resp.status_code == 400)
+
+stub.set_request(module, stub.PluginRequest(headers={}, query={"date": DAY}))
+resp = asyncio.run(context.handler_for("/summary")())
+check("/summary 需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
+
+# ================================================================ 16. 每日目标
+section("16. 端到端 · 每日目标 /targets")
+
+plugin.config["target_calories_kcal"] = 1800
+plugin.config["target_protein_g"] = 90
+check("配置里的目标生效", plugin._targets()["calories_kcal"] == 1800.0, plugin._targets())
+check("未配置的走默认值", plugin._targets()["carbs_g"] == module.DEFAULT_TARGETS["carbs_g"])
+
+make_request(payload={"calories_kcal": 2200, "fat_g": 70})
+resp = call("/targets")
+check("/targets 返回 200", resp.status_code == 200, resp.payload)
+check("返回更新后的目标", resp.payload["targets"]["calories_kcal"] == 2200.0, resp.payload)
+t = plugin._targets()
+check("APP 覆盖优先于插件配置", t["calories_kcal"] == 2200.0, t)
+check("未提交的键保留插件配置值", t["protein_g"] == 90.0, t)
+check("目标真的落盘了", plugin._load_state().get("targets", {}).get("calories_kcal") == 2200.0)
+
+make_request(payload={"calories_kcal": "很多"})
+resp = call("/targets")
+check("非数字被拒绝", resp.status_code == 400 and "数字" in resp.payload["message"], resp.payload)
+
+make_request(payload={"calories_kcal": -5})
+resp = call("/targets")
+check("负数被拒绝", resp.status_code == 400 and "范围" in resp.payload["message"], resp.payload)
+
+make_request(payload={"calories_kcal": 999999})
+resp = call("/targets")
+check("离谱数值被拒绝", resp.status_code == 400, resp.payload)
+
+make_request(payload={})
+resp = call("/targets")
+check("没有可更新字段时被拒绝", resp.status_code == 400, resp.payload)
+
+check("/summary 反映了新目标", True)
+make_request(query={"date": DAY})
+resp = call("/summary")
+check("/summary 里的目标已更新", resp.payload["targets"]["calories_kcal"] == 2200.0, resp.payload["targets"])
+
+# ================================================================ 17. 流式分析
+section("17. 端到端 · 流式分析 /analyze_stream")
+
+PIECES = ["盘中是炒饭、鸡蛋和虾仁", 
+          "，油量偏多。\n",
+          '{"is_food":true,"title":"扬州炒饭","meal":"午餐",',
+          '"calories_kcal":720,"protein_g":31.5,"carbs_g":81,"fat_g":28.2,',
+          '"items":[],"advice":"少放油"}']
+
+
+def patch_stream(pieces=None, fail=None, meta="openai:stream-test"):
+    async def gen(path, note):
+        if fail:
+            raise RuntimeError(fail)
+        yield ("meta", meta)
+        for p in (pieces or PIECES):
+            yield ("delta", p)
+    plugin._stream_model = gen
+
+
+patch_stream()
+events = events_of("/analyze_stream", files={"file": upload("stream.jpg")})
+kinds = [e.get("type") for e in events]
+check("第一个事件是 start", kinds and kinds[0] == "start", kinds)
+check("包含 meta 事件", "meta" in kinds, kinds)
+check("包含多个 delta 事件", kinds.count("delta") == len(PIECES), kinds)
+check("最后一个事件是 done", kinds and kinds[-1] == "done", kinds)
+
+streamed = "".join(e["text"] for e in events if e.get("type") == "delta")
+check("增量拼接后等于原始输出", streamed == "".join(PIECES), streamed)
+check("meta 带上了模型标识", any(e.get("engine") == "openai:stream-test" for e in events if e.get("type") == "meta"))
+
+done = [e for e in events if e.get("type") == "done"][0]
+srec = done["record"]
+check("流式结果解析出标题", srec.get("title") == "扬州炒饭", srec)
+check("流式结果带热量", srec.get("calories_kcal") == 720.0, srec)
+check("流式记录已落盘", any(r.get("id") == srec["id"] for r in plugin._load_records(DAY)))
+check("流式照片已归档", (plugin.photo_dir / DAY / srec["photo"]).is_file())
+
+patch_stream(fail="模型连接失败")
+events = events_of("/analyze_stream", files={"file": upload("boom.jpg")})
+errs = [e for e in events if e.get("type") == "error"]
+check("模型出错时发 error 事件", len(errs) == 1, events)
+check("error 事件带错误信息", "模型连接失败" in errs[0].get("message", ""), errs)
+check("出错后不再发 done", not any(e.get("type") == "done" for e in events))
+
+make_request(files={})
+resp = call("/analyze_stream")
+check("流式接口缺文件时返回普通错误", resp.status_code == 400 and "缺少文件字段" in resp.payload["message"], resp.payload)
+
+stub.set_request(module, stub.PluginRequest(headers={}, files={}))
+resp = asyncio.run(context.handler_for("/analyze_stream")())
+check("流式接口需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
+
+# 文字流式
+patch_stream()
+events = events_of("/analyze_text_stream", payload={"text": "下午吃了两个橙子"})
+kinds = [e.get("type") for e in events]
+check("文字流式返回 start/delta/done", kinds[0] == "start" and kinds[-1] == "done", kinds)
+trec2 = [e for e in events if e.get("type") == "done"][0]["record"]
+check("文字流式记录 source 为 app-text", trec2.get("source") == "app-text", trec2)
+check("文字流式记录 photo 为空", trec2.get("photo") == "", trec2)
+check("文字流式保留原文", trec2.get("note") == "下午吃了两个橙子", trec2)
+
+make_request(payload={"text": ""})
+resp = call("/analyze_text_stream")
+check("文字流式缺 text 返回错误", resp.status_code == 400 and "缺少 text" in resp.payload["message"], resp.payload)
+
+stub.set_request(module, stub.PluginRequest(headers={}, payload={"text": "x"}))
+resp = asyncio.run(context.handler_for("/analyze_text_stream")())
+check("文字流式需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
+
+check("stream_response 在桩里可用", stub.stream_response is not None)
+check("桩能识别流式响应类型", isinstance(stub.FakeStreamResponse((x for x in [])), stub.FakeResponse))
+
+# ================================================================ 18. 提示词格式
+section("18. 提示词要求两行输出（便于流式展示）")
+check("拍照提示词要求先给一句观察", "第一行" in module.DEFAULT_PROMPT and "40 字以内" in module.DEFAULT_PROMPT)
+check("拍照提示词要求第二行是 JSON", "第二行" in module.DEFAULT_PROMPT)
+check("文字提示词同样要求两行", "第一行" in module.TEXT_PROMPT and "第二行" in module.TEXT_PROMPT)
+check("两行输出仍能被解析", module.DietPlugin._parse_json("看到一碗面。\n" + '{"title":"牛肉面","calories_kcal":600}').get("title") == "牛肉面")
+check("带前后缀的两行输出也能解析", module.DietPlugin._parse_json("观察：有米饭\n" + '{"title":"炒饭"}' + "\n完毕").get("title") == "炒饭")
 
 # ================================================================ 结果
 print()

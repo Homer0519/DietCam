@@ -171,6 +171,46 @@ def error_response(message: str, *, status_code: int = 400, data: Any = None, **
     return FakeResponse("error", {"message": message, "data": data}, status_code)
 
 
+class FakeStreamResponse(FakeResponse):
+    """对照 stream_response 的返回值。
+
+    payload 是异步生成器；测试里用 await resp.collect() 把全部块取出来。
+    """
+
+    def __init__(self, content: Any, content_type: str = "text/event-stream") -> None:
+        super().__init__("stream", content, 200)
+        self.content_type = content_type
+
+    async def chunks(self) -> list[str]:
+        out: list[str] = []
+        async for piece in self.payload:
+            out.append(piece if isinstance(piece, str) else piece.decode("utf-8", "replace"))
+        return out
+
+    async def text(self) -> str:
+        return "".join(await self.chunks())
+
+    async def events(self) -> list[dict]:
+        """把 SSE 文本解析成事件对象列表。"""
+        import json as _json
+
+        parsed: list[dict] = []
+        for block in (await self.text()).split("\n\n"):
+            for line in block.splitlines():
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                try:
+                    parsed.append(_json.loads(raw))
+                except _json.JSONDecodeError:
+                    parsed.append({"_raw": raw})
+        return parsed
+
+
+def stream_response(content: Any, *, content_type: str = "text/event-stream", status_code: int = 200, **_: Any) -> FakeStreamResponse:
+    return FakeStreamResponse(content, content_type)
+
+
 def file_response(path: Any, *, filename: str | None = None, content_type: str | None = None, **_: Any) -> FakeResponse:
     return FakeResponse("file", str(path), 200)
 
@@ -265,6 +305,7 @@ def install(plugin_data_dir: Path) -> tuple[_Logger, FakeContext]:
         json_response=json_response,
         error_response=error_response,
         file_response=file_response,
+        stream_response=stream_response,
         PluginMultiDict=PluginMultiDict,
         PluginUploadFile=PluginUploadFile,
         PluginRequest=PluginRequest,

@@ -73,5 +73,26 @@
     "type": "text",
     "default": "",
     "hint": "APP 里不拍照、直接打字描述吃了什么时使用；留空用内置营养师提示词"
+  },
+  "target_calories_kcal": {
+    "description": "每日热量目标（kcal）",
+    "type": "int",
+    "default": 2000,
+    "hint": "APP 主页会用它画进度条；也可以在 APP 里直接改，改动存在 state.json，优先级高于这里"
+  },
+  "target_protein_g": {
+    "description": "每日蛋白质目标（g）",
+    "type": "int",
+    "default": 75
+  },
+  "target_carbs_g": {
+    "description": "每日碳水目标（g）",
+    "type": "int",
+    "default": 250
+  },
+  "target_fat_g": {
+    "description": "每日脂肪目标（g）",
+    "type": "int",
+    "default": 65
   }
 }

@@ -144,20 +144,58 @@ async def main() -> int:
         module_name="diet_demo",
     )
 
-    queue = [FRIED_RICE, SNACK, TYPED_MEAL]
+    STREAM_MEAL = {
+        "is_food": True,
+        "title": "番茄牛腩饭",
+        "meal": "晚餐",
+        "items": [
+            {"name": "米饭", "portion": "约 200g", "calories_kcal": 260, "protein_g": 5.0, "carbs_g": 58.0, "fat_g": 0.8},
+            {"name": "番茄牛腩", "portion": "约 250g", "calories_kcal": 420, "protein_g": 32.0, "carbs_g": 12.0, "fat_g": 26.0},
+        ],
+        "calories_kcal": 680,
+        "protein_g": 37.0,
+        "carbs_g": 70.0,
+        "fat_g": 26.8,
+        "confidence": 0.79,
+        "advice": "牛腩脂肪偏高，配一份清炒青菜会更平衡。",
+    }
+    queue = [FRIED_RICE, SNACK, TYPED_MEAL, STREAM_MEAL]
 
-    async def fake_analyze(path, prompt):
-        await asyncio.sleep(0)
+    def next_item(prompt: str) -> dict:
         note = ""
         if "补充说明：" in prompt:
             note = prompt.split("补充说明：", 1)[1].strip()
-        item = queue.pop(0)
+        item = dict(queue.pop(0))
         if note:
-            item = dict(item)
             item["advice"] = item["advice"] + "（已参考你的说明：%s）" % note
-        return json.dumps(item, ensure_ascii=False), "openai:qwen2.5-vl-7b-instruct (stub)"
+        return item
+
+    async def fake_analyze(path, prompt):
+        await asyncio.sleep(0)
+        return json.dumps(next_item(prompt), ensure_ascii=False), "openai:qwen2.5-vl-7b-instruct (stub)"
 
     plugin._analyze_openai = fake_analyze
+
+    async def fake_stream(path, note):
+        """模拟真实的流式输出：先来一句观察，再逐段吐 JSON。"""
+        item = next_item(note)
+        observation = "盘中是%s，整体%s。" % (
+            item["title"],
+            "油量偏多" if item["fat_g"] > 20 else "比较清淡",
+        )
+        await asyncio.sleep(0)
+        yield ("meta", "openai:qwen2.5-vl-7b-instruct (stub)")
+        for ch in observation:
+            yield ("delta", ch)
+            await asyncio.sleep(0)
+        yield ("delta", "\n")
+        blob = json.dumps(item, ensure_ascii=False)
+        step = max(1, len(blob) // 6)
+        for i in range(0, len(blob), step):
+            yield ("delta", blob[i:i + step])
+            await asyncio.sleep(0)
+
+    plugin._stream_model = fake_stream
 
     def headers():
         return dict(stub.auth_headers(plugin))
@@ -236,6 +274,59 @@ async def main() -> int:
     print("      建议      %s" % trec["advice"])
     print("      归档字段  photo=%r  source=%r" % (trec["photo"], trec["source"]))
 
+    # ------------------------------------------------ 2c. 流式分析（SSE）
+    print()
+    print("[2c] POST /analyze_stream   流式分析（服务端逐段下发）")
+    set_request(files={"file": stub.PluginUploadFile("stream.png", make_png(280, 280), "image/png")})
+    resp = await call("/analyze_stream")
+    print("    HTTP %d   Content-Type: %s" % (resp.status_code, resp.content_type))
+    events = await resp.events()
+    deltas = [e for e in events if e.get("type") == "delta"]
+    print("    收到 %d 个 SSE 事件（其中 delta %d 个）：" % (len(events), len(deltas)))
+    streamed = ""
+    for ev in events:
+        kind = ev.get("type")
+        if kind == "start":
+            print("      · start        开始")
+        elif kind == "meta":
+            print("      · meta         engine=%s" % ev.get("engine"))
+        elif kind == "delta":
+            streamed += ev.get("text", "")
+        elif kind == "done":
+            rs = ev["record"]
+            print("      · done         %s · %g kcal" % (rs["title"], rs["calories_kcal"]))
+        elif kind == "error":
+            print("      · error        %s" % ev.get("message"))
+    print()
+    print("    把 delta 按到达顺序拼起来，就是模型的原始输出：")
+    for ln in streamed.splitlines():
+        print("      | " + ln[:96])
+
+    # --------------------------------------------------- 2d. 主页概要
+    print()
+    print("[2d] GET /summary   主页需要的当日概览")
+    set_request(query={})
+    resp = await call("/summary")
+    payload = resp.payload
+    print("    HTTP %d" % resp.status_code)
+    print("    日期   %s" % payload["date"])
+    print("    合计   %g kcal｜蛋白 %g｜碳水 %g｜脂肪 %g" % (
+        payload["totals"]["calories_kcal"], payload["totals"]["protein_g"],
+        payload["totals"]["carbs_g"], payload["totals"]["fat_g"]))
+    print("    目标   %g kcal｜蛋白 %g｜碳水 %g｜脂肪 %g" % (
+        payload["targets"]["calories_kcal"], payload["targets"]["protein_g"],
+        payload["targets"]["carbs_g"], payload["targets"]["fat_g"]))
+    used = payload["totals"]["calories_kcal"] / payload["targets"]["calories_kcal"] * 100
+    print("    进度   热量已用 %.0f%%" % used)
+
+    # --------------------------------------------------- 2e. 调整目标
+    print()
+    print("[2e] POST /targets   调整每日目标（存 state.json，不动插件配置）")
+    set_request(payload={"calories_kcal": 1900, "protein_g": 100})
+    resp = await call("/targets")
+    print("    HTTP %d   更新后：%s" % (
+        resp.status_code, json.dumps(resp.payload["targets"], ensure_ascii=False)))
+
     # 3. records
     day = dt.datetime.now(plugin.tz).strftime("%Y-%m-%d")
     print()
@@ -269,6 +360,10 @@ async def main() -> int:
     set_request(query={"date": day, "name": "../../../main.py"})
     resp = await call("/photo")
     print("    路径穿越 -> HTTP %d  %s" % (resp.status_code, resp.payload["message"]))
+
+    stub.set_request(module, stub.PluginRequest(headers={}, files={}))
+    resp = await context.handler_for("/analyze_stream")()
+    print("    流式无签名 -> HTTP %d  %s" % (resp.status_code, resp.payload["message"]))
 
     # 6. 指令
     class Ev(stub.FakeEvent):

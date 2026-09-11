@@ -50,13 +50,24 @@
 
 ## 使用
 
+### 主页
+
+打开 APP 就是主页：当日摄入 / 每日目标的进度环、热量剩余、三大营养素进度条，
+下面是今天的逐条记录（带缩略图）。底部的绿色圆钮进入相机。
+
+### 记录
+
 | 操作 | 结果 |
 | --- | --- |
-| 拍一张餐食照片 | 自动分析并以卡片显示热量与三大营养素，同时归档到当天 |
+| 拍一张餐食照片 | 按下快门后**画面定格**，可以确认或重拍；确认后分析并归档 |
 | **在输入框打字后按 ➤** | **不拍照也能记录**，直接描述吃了什么即可分析（如"中午吃了一碗牛肉面"） |
 | 打字 + 拍照 | 文字作为补充说明一起交给模型，估算更准（如"这是一人份""少油"） |
-| 在输入框打字后按 ➤ | **不拍照也能记录**，直接描述吃了什么即可分析（如"中午吃了一碗牛肉面"） |
-| 打字 + 拍照 | 文字会作为补充说明一起交给模型，估算更准（如"这是一人份"） |
+| 分析过程中 | 实时显示模型正在输出的内容，随时可以**中断** |
+
+### 聊天指令
+
+| 指令 | 结果 |
+| --- | --- |
 | `/饮食` | 今天的饮食日报 |
 | `/饮食 昨天` | 昨天的日报 |
 | `/饮食 2026-06-27` | 指定日期 |
@@ -126,7 +137,7 @@ python tools/bump_version.py --show    # 查看当前版本
 
 不是"写完就交"，下面这些是实际跑出来的结果：
 
-**AstrBot 插件 — 107 项测试全部通过**
+**AstrBot 插件 — 156 项测试全部通过**
 
 ```bash
 python tools/run_all_checks.py      # 一键跑完下面全部检查
@@ -134,7 +145,7 @@ python tools/run_all_checks.py      # 一键跑完下面全部检查
 
 | 检查 | 说明 |
 | --- | --- |
-| `tools/plugin_selftest.py` | 107 项单元 + 端到端测试 |
+| `tools/plugin_selftest.py` | 156 项单元 + 端到端测试 |
 | `tools/verify_regression.py` | 验证测试本身有效（能区分修复前后） |
 | `tools/demo_plugin.py` | 端到端演示，兼作冒烟测试 |
 
@@ -180,22 +191,22 @@ BUILD SUCCESSFUL in 34s
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-1.0.2-release.apk`（12.24 MB） |
-| 包名 / 版本 | `com.dietcam.app` v1.0.2 (versionCode 3) |
+| 产物 | `dist/DietCam-2.0.0-release.apk`（12.30 MB） |
+| 包名 / 版本 | `com.dietcam.app` v2.0.0 (versionCode 4) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
 | 签名方案 | APK Signature Scheme v2 + v3 均已校验通过 |
 | 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（跨构建稳定） |
-| SHA-256 | `932C85F4443505F2AB2A68341CE5D65871801489CAF1BADC48AB5485D5E8C00F` |
+| SHA-256 | `3BF04FF1E41C01C68B8A0D9D770C4E49C5954834128738CB4CA1CD834F76E03B` |
 
-**升级路径实测** —— 1.0.2（文字输入 + 连接报错提示）由 `bump_version.py` 递增后构建：
+**升级路径实测** —— 2.0.0（主页 + 定格 + 流式）由 `bump_version.py` 递增后构建：
 
-| | 1.0.0 | 1.0.2 |
+| | 1.0.0 | 2.0.0 |
 | --- | --- | --- |
 | applicationId | `com.dietcam.app` | `com.dietcam.app` ✅ 一致 |
-| versionCode | 1 | 3 ✅ 更大 |
+| versionCode | 1 | 4 ✅ 更大 |
 | 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d76d49a7…` ✅ 完全一致 |
 
 三个条件同时满足，因此新包会被系统识别为**升级**而不是新装。

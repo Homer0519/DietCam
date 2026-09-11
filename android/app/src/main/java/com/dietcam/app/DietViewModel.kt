@@ -1,55 +1,64 @@
 package com.dietcam.app
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.json.JSONObject
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import kotlin.math.max
 
-data class MealItem(
-    val name: String,
-    val portion: String,
-    val kcal: Double,
+/** 主页状态。 */
+data class HomeUiState(
+    val loading: Boolean = true,
+    val refreshing: Boolean = false,
+    val summary: DaySummary? = null,
+    val error: String? = null,
 )
 
-data class MealResult(
-    val title: String,
-    val meal: String,
-    val kcal: Double,
-    val protein: Double,
-    val carbs: Double,
-    val fat: Double,
-    val items: List<MealItem>,
-    val advice: String,
-    val isFood: Boolean,
-)
+/** 拍照页状态机：取景 -> 定格确认 -> 分析中 -> 结果。 */
+sealed interface CaptureUiState {
+    data object Live : CaptureUiState
 
-sealed interface DietState {
-    data object Idle : DietState
-    data object Uploading : DietState
-    data class Success(val result: MealResult, val at: String) : DietState
-    data class Failed(val message: String, val at: String) : DietState
+    /** 画面已定格，等用户确认或重拍。 */
+    data class Reviewing(val file: File, val bitmap: Bitmap) : CaptureUiState
 
-    /** 中性提示（连接测试结果、配置说明等），用普通样式展示而非报错样式。 */
-    data class Notice(val title: String, val message: String) : DietState
+    /** 正在分析，[streamed] 是模型已经吐出的内容。 */
+    data class Analyzing(val streamed: String, val engine: String = "") : CaptureUiState
+
+    data class Done(val record: MealRecord) : CaptureUiState
+    data class Failed(val message: String) : CaptureUiState
 }
+
+/** 中性提示弹窗（连接测试、说明等）。 */
+data class Notice(val title: String, val message: String)
 
 class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store = SettingsStore(app)
 
-    private val _state = MutableStateFlow<DietState>(DietState.Idle)
-    val state: StateFlow<DietState> = _state.asStateFlow()
+    private val _home = MutableStateFlow(HomeUiState())
+    val home: StateFlow<HomeUiState> = _home.asStateFlow()
+
+    private val _capture = MutableStateFlow<CaptureUiState>(CaptureUiState.Live)
+    val capture: StateFlow<CaptureUiState> = _capture.asStateFlow()
+
+    private val _notice = MutableStateFlow<Notice?>(null)
+    val notice: StateFlow<Notice?> = _notice.asStateFlow()
 
     private val _configVersion = MutableStateFlow(0)
     val configVersion: StateFlow<Int> = _configVersion.asStateFlow()
+
+    private var analyzeJob: Job? = null
+
+    // ------------------------------------------------------------- 设置
 
     fun settings(): DietSettings = store.snapshot()
 
@@ -60,10 +69,11 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         store.apiKey = apiKey
         store.secret = secret
         _configVersion.value = _configVersion.value + 1
+        refreshHome()
     }
 
-    fun reset() {
-        _state.value = DietState.Idle
+    fun dismissNotice() {
+        _notice.value = null
     }
 
     fun testConnection() {
@@ -73,98 +83,186 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         if (current.apiKey.isBlank()) missing.add("AstrBot API Key")
         if (current.secret.isBlank()) missing.add("签名密钥")
         if (missing.isNotEmpty()) {
-            _state.value = DietState.Notice(
-                "还差几项没填",
-                "请先填写：" + missing.joinToString("、"),
-            )
+            _notice.value = Notice("还差几项没填", "请先填写：" + missing.joinToString("、"))
             return
         }
-        _state.value = DietState.Uploading
         viewModelScope.launch {
             try {
                 val json = DietApi(current).health()
-                _state.value = DietState.Notice(
+                val features = json.optJSONObject("features")
+                val stream = features?.optBoolean("stream", false) ?: false
+                _notice.value = Notice(
                     "连接成功 ✅",
-                    "插件版本：" + json.optString("version", "?") + "\n" +
-                        "数据目录：" + json.optString("data_dir", "?") + "\n\n" +
-                        "两把钥匙都对上了，可以开始记录。",
+                    buildString {
+                        append("插件版本：").append(json.optString("version", "?"))
+                        append("\n流式分析：").append(if (stream) "已启用" else "未启用（将自动降级）")
+                        append("\n数据目录：").append(json.optString("data_dir", "?"))
+                        append("\n\n两把钥匙都对上了，可以开始记录。")
+                    },
                 )
             } catch (e: Exception) {
-                _state.value = DietState.Notice("连接失败", DietApi.friendlyMessage(e))
+                _notice.value = Notice("连接失败", DietApi.friendlyMessage(e))
             }
         }
     }
 
-    /** 纯文字记录。 */
+    // -------------------------------------------------------------- 主页
+
+    fun refreshHome() {
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank() || current.secret.isBlank()) {
+            _home.value = HomeUiState(loading = false, error = "还没有配置服务器")
+            return
+        }
+        viewModelScope.launch {
+            _home.value = _home.value.copy(refreshing = _home.value.summary != null, error = null)
+            try {
+                val json = DietApi(current).summary()
+                _home.value = HomeUiState(
+                    loading = false,
+                    refreshing = false,
+                    summary = JsonParse.summary(json),
+                )
+            } catch (e: Exception) {
+                _home.value = _home.value.copy(
+                    loading = false,
+                    refreshing = false,
+                    error = DietApi.friendlyMessage(e),
+                )
+            }
+        }
+    }
+
+    fun saveTargets(targets: Map<String, Double>) {
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank()) return
+        viewModelScope.launch {
+            try {
+                DietApi(current).updateTargets(targets)
+                refreshHome()
+            } catch (e: Exception) {
+                _notice.value = Notice("保存目标失败", DietApi.friendlyMessage(e))
+            }
+        }
+    }
+
+    // -------------------------------------------------------- 拍照与分析
+
+    /** 快门按下、照片已落盘：解码出来定格显示。 */
+    fun onPhotoCaptured(file: File) {
+        viewModelScope.launch {
+            val bitmap = decodeScaled(file)
+            if (bitmap == null) {
+                file.delete()
+                _capture.value = CaptureUiState.Failed("照片读取失败，请重试")
+                return@launch
+            }
+            _capture.value = CaptureUiState.Reviewing(file, bitmap)
+        }
+    }
+
+    /** 重拍：丢掉刚才那张，回到取景。 */
+    fun retake() {
+        val state = _capture.value
+        if (state is CaptureUiState.Reviewing) {
+            state.file.delete()
+        }
+        _capture.value = CaptureUiState.Live
+    }
+
+    /** 确认这张照片，开始流式分析。 */
+    fun confirmPhoto(note: String) {
+        val state = _capture.value
+        if (state !is CaptureUiState.Reviewing) return
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank() || current.secret.isBlank()) {
+            _capture.value = CaptureUiState.Failed("请先在设置里填写服务器地址与密钥")
+            return
+        }
+        startAnalyze(state.file, note) { api, onDelta ->
+            api.analyzeStream(state.file, note, onDelta)
+        }
+    }
+
+    /** 纯文字记录（同样走流式）。 */
     fun submitText(text: String) {
         val desc = text.trim()
-        if (desc.isEmpty()) {
-            return
-        }
+        if (desc.isEmpty()) return
         val current = store.snapshot()
         if (current.baseUrl.isBlank() || current.secret.isBlank()) {
-            _state.value = DietState.Failed("请先点右上角设置，填写服务器地址与签名密钥", now())
+            _capture.value = CaptureUiState.Failed("请先在设置里填写服务器地址与密钥")
             return
         }
-        _state.value = DietState.Uploading
-        viewModelScope.launch {
-            try {
-                val json = DietApi(current).analyzeText(desc)
-                _state.value = DietState.Success(parse(json), now())
-            } catch (e: Exception) {
-                _state.value = DietState.Failed(DietApi.friendlyMessage(e), now())
-            }
+        startAnalyze(null, desc) { api, onDelta ->
+            api.analyzeTextStream(desc, onDelta)
         }
     }
 
-    fun submit(file: File, note: String = "") {
-        val current = store.snapshot()
-        if (current.baseUrl.isBlank() || current.secret.isBlank()) {
-            _state.value = DietState.Failed("请先点右上角设置，填写服务器地址与签名密钥", now())
-            return
-        }
-        _state.value = DietState.Uploading
-        viewModelScope.launch {
+    private fun startAnalyze(
+        file: File?,
+        note: String,
+        call: suspend (DietApi, (String) -> Unit) -> org.json.JSONObject,
+    ) {
+        analyzeJob?.cancel()
+        val api = DietApi(store.snapshot())
+        val buffer = StringBuilder()
+        _capture.value = CaptureUiState.Analyzing("")
+        analyzeJob = viewModelScope.launch {
             try {
-                val json = DietApi(current).analyze(file, note)
-                _state.value = DietState.Success(parse(json), now())
+                val record = call(api) { piece ->
+                    buffer.append(piece)
+                    _capture.value = CaptureUiState.Analyzing(buffer.toString())
+                }
+                _capture.value = CaptureUiState.Done(JsonParse.record(record))
+                refreshHome()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _state.value = DietState.Failed(DietApi.friendlyMessage(e), now())
+                _capture.value = CaptureUiState.Failed(DietApi.friendlyMessage(e))
             } finally {
-                runCatching { file.delete() }
+                file?.delete()
             }
         }
     }
 
-    private fun now(): String =
-        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+    /** 用户中途放弃分析。 */
+    fun cancelAnalysis() {
+        analyzeJob?.cancel()
+        analyzeJob = null
+        _capture.value = CaptureUiState.Live
+    }
 
-    private fun parse(json: JSONObject): MealResult {
-        val record = json.optJSONObject("record") ?: json
-        val items = mutableListOf<MealItem>()
-        val array = record.optJSONArray("items")
-        if (array != null) {
-            for (i in 0 until array.length()) {
-                val obj = array.optJSONObject(i) ?: continue
-                items.add(
-                    MealItem(
-                        name = obj.optString("name", "?"),
-                        portion = obj.optString("portion", ""),
-                        kcal = obj.optDouble("calories_kcal", 0.0),
-                    )
-                )
-            }
+    /** 回到取景，准备下一张。 */
+    fun resetCapture() {
+        analyzeJob?.cancel()
+        analyzeJob = null
+        val state = _capture.value
+        if (state is CaptureUiState.Reviewing) {
+            state.file.delete()
         }
-        return MealResult(
-            title = record.optString("title", "一餐"),
-            meal = record.optString("meal", ""),
-            kcal = record.optDouble("calories_kcal", 0.0),
-            protein = record.optDouble("protein_g", 0.0),
-            carbs = record.optDouble("carbs_g", 0.0),
-            fat = record.optDouble("fat_g", 0.0),
-            items = items,
-            advice = record.optString("advice", ""),
-            isFood = record.optBoolean("is_food", true),
-        )
+        _capture.value = CaptureUiState.Live
+    }
+
+    private suspend fun decodeScaled(file: File): Bitmap? = withContext(Dispatchers.IO) {
+        if (!file.exists() || file.length() == 0L) return@withContext null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        var sample = 1
+        val longest = max(bounds.outWidth, bounds.outHeight)
+        while (longest / sample > 1600) {
+            sample *= 2
+        }
+        runCatching {
+            BitmapFactory.decodeFile(
+                file.absolutePath,
+                BitmapFactory.Options().apply { inSampleSize = sample },
+            )
+        }.getOrNull()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        analyzeJob?.cancel()
+        (_capture.value as? CaptureUiState.Reviewing)?.let { it.file.delete() }
     }
 }

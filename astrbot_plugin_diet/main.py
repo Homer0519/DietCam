@@ -41,22 +41,44 @@ from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 try:  # 插件 Web API 需要 AstrBot 4.18+ 且启用了插件 Pages
-    from astrbot.api.web import error_response, file_response, json_response, request
+    from astrbot.api.web import (
+        error_response,
+        file_response,
+        json_response,
+        request,
+        stream_response,
+    )
 
     WEB_API = True
 except Exception:  # pragma: no cover - 兼容旧版本
     error_response = file_response = json_response = None  # type: ignore
+    stream_response = None  # type: ignore
     request = None  # type: ignore
     WEB_API = False
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.0.3"
+PLUGIN_VERSION = "1.1.0"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
-DEFAULT_PROMPT = """你是一位严谨、友善的专业营养师。请仔细观察这张餐食照片，估算每种食物的份量与营养，并**只输出一个 JSON 对象**，不要输出任何解释文字，也不要用 Markdown 代码块包裹。
+# 每日摄入目标（可在插件配置里改，也可由 APP 覆盖，覆盖值存在 state.json）
+DEFAULT_TARGETS = {
+    "calories_kcal": 2000.0,
+    "protein_g": 75.0,
+    "carbs_g": 250.0,
+    "fat_g": 65.0,
+}
+
+# SSE 每条事件的前缀
+SSE_PREFIX = "data: "
+
+DEFAULT_PROMPT = """你是一位严谨、友善的专业营养师。请仔细观察这张餐食照片，估算每种食物的份量与营养。
+
+输出格式**严格两行**：
+第一行：一句简短的中文观察，40 字以内，说明你看到了什么，例如"盘中是炒饭、鸡蛋和虾仁，油量偏多"。
+第二行：一个 JSON 对象（写成一行，不要换行，不要用 Markdown 代码块包裹）。
 
 JSON 结构如下：
 {"is_food":true,"title":"一句话概括这一餐","meal":"早餐或午餐或晚餐或加餐或零食","items":[{"name":"食物名","portion":"约150g","calories_kcal":230,"protein_g":12.5,"carbs_g":30.0,"fat_g":6.0}],"calories_kcal":520,"protein_g":30.0,"carbs_g":60.0,"fat_g":18.0,"confidence":0.8,"advice":"一句简短、具体、友善的建议"}
@@ -66,10 +88,14 @@ JSON 结构如下：
 2. 所有数值都是估算值；calories_kcal / protein_g / carbs_g / fat_g 表示整餐合计。
 3. confidence 是 0 到 1 之间的置信度。
 4. advice 要具体（例如"蛋白质偏少，可以加一个鸡蛋或一杯无糖酸奶"），不要说空话。
-5. 只输出 JSON，不要有多余字符。"""
+5. 第二行必须是**能被 json.loads 直接解析**的完整 JSON，前后不要有任何多余字符。"""
 
 
-TEXT_PROMPT = """你是一位严谨、友善的专业营养师。用户没有拍照，而是用文字描述了自己吃了什么。请根据这段描述估算份量与营养，并**只输出一个 JSON 对象**，不要输出任何解释文字，也不要用 Markdown 代码块包裹。
+TEXT_PROMPT = """你是一位严谨、友善的专业营养师。用户没有拍照，而是用文字描述了自己吃了什么。请根据这段描述估算份量与营养。
+
+输出格式**严格两行**：
+第一行：一句简短的中文观察，40 字以内，指出你如何理解这份描述，例如"按常见的兰州拉面份量估算，另加一个卤蛋"。
+第二行：一个 JSON 对象（写成一行，不要换行，不要用 Markdown 代码块包裹）。
 
 JSON 结构如下：
 {"is_food":true,"title":"一句话概括这一餐","meal":"早餐或午餐或晚餐或加餐或零食","items":[{"name":"食物名","portion":"约150g","calories_kcal":230,"protein_g":12.5,"carbs_g":30.0,"fat_g":6.0}],"calories_kcal":520,"protein_g":30.0,"carbs_g":60.0,"fat_g":18.0,"confidence":0.6,"advice":"一句简短、具体、友善的建议"}
@@ -78,7 +104,7 @@ JSON 结构如下：
 1. 描述里没有食物的，返回 {"is_food": false, "reason": "简短原因"}。
 2. 用户对份量的描述可能很模糊（例如"一碗面"），按常见份量估算，并在 confidence 里体现不确定性。
 3. 如果描述明显不完整（例如只写了"吃了饭"），照样给出估算，但在 advice 里点出缺了什么信息会算得更准。
-4. 只输出 JSON，不要有多余字符。"""
+4. 第二行必须是**能被 json.loads 直接解析**的完整 JSON，前后不要有任何多余字符。"""
 
 
 def _pick(mapping: Any, key: str, default: Any = None) -> Any:
@@ -147,6 +173,20 @@ class DietPlugin(Star):
             (prefix + "/health", self.api_health, ["GET"], "diet health check"),
             (prefix + "/analyze", self.api_analyze, ["POST"], "analyze a meal photo"),
             (prefix + "/analyze_text", self.api_analyze_text, ["POST"], "analyze a typed meal description"),
+            (
+                prefix + "/analyze_stream",
+                self.api_analyze_stream,
+                ["POST"],
+                "analyze a meal photo, streamed as SSE",
+            ),
+            (
+                prefix + "/analyze_text_stream",
+                self.api_analyze_text_stream,
+                ["POST"],
+                "analyze a typed description, streamed as SSE",
+            ),
+            (prefix + "/summary", self.api_summary, ["GET"], "today's intake and daily targets"),
+            (prefix + "/targets", self.api_targets, ["POST"], "update daily targets"),
             (prefix + "/archive", self.api_archive, ["POST"], "archive a photo (base64)"),
             (prefix + "/records", self.api_records, ["GET"], "list one day records"),
             (prefix + "/photo", self.api_photo, ["GET"], "fetch an archived photo"),
@@ -261,6 +301,54 @@ class DietPlugin(Star):
             logger.warning("[diet] 配置 %s 不是合法 JSON，已忽略", key)
             return {}
 
+    # ---------------------------------------------------------- 状态与目标
+
+    def _state_file(self) -> Path:
+        return self.data_dir / "state.json"
+
+    def _load_state(self) -> dict:
+        path = self._state_file()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self, state: dict) -> None:
+        try:
+            self._state_file().write_text(
+                json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning("[diet] 写入 state.json 失败: %s", exc)
+
+    def _targets(self) -> dict:
+        """每日目标：插件配置为底，APP 写入 state.json 的覆盖值优先。"""
+        targets = dict(DEFAULT_TARGETS)
+        for key in DEFAULT_TARGETS:
+            raw = self.config.get("target_" + key)
+            if raw in (None, ""):
+                continue
+            try:
+                targets[key] = float(raw)
+            except (TypeError, ValueError):
+                continue
+        override = self._load_state().get("targets")
+        if isinstance(override, dict):
+            for key in DEFAULT_TARGETS:
+                try:
+                    if override.get(key) not in (None, ""):
+                        targets[key] = float(override[key])
+                except (TypeError, ValueError):
+                    continue
+        return {k: round(v, 1) for k, v in targets.items()}
+
+    @staticmethod
+    def _sse(payload: dict) -> str:
+        return SSE_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
     def _save_photo(self, upload: Any) -> tuple[Path, str, str]:
         """把上传对象保存到 photos/<day>/ 下，返回 (路径, 文件名, 日期)。"""
         now = dt.datetime.now(self.tz)
@@ -310,7 +398,8 @@ class DietPlugin(Star):
         parsed["_engine"] = engine
         return parsed
 
-    async def _analyze_openai(self, path: Path | None, prompt: str) -> tuple[str, str]:
+    def _openai_request(self, path: Path | None, prompt: str, stream: bool = False):
+        """拼装 OpenAI 兼容请求，普通与流式两路共用。"""
         base = str(self.config.get("base_url") or "").strip().rstrip("/")
         if not base:
             raise RuntimeError("base_url 未配置")
@@ -337,12 +426,18 @@ class DietPlugin(Star):
             "temperature": 0.2,
             "max_tokens": 1024,
         }
+        if stream:
+            payload["stream"] = True
         payload.update(self._json_conf("extra_body"))
 
         try:
             timeout_s = float(self.config.get("request_timeout") or 120)
         except (TypeError, ValueError):
             timeout_s = 120.0
+        return base, payload, headers, timeout_s, model
+
+    async def _analyze_openai(self, path: Path | None, prompt: str) -> tuple[str, str]:
+        base, payload, headers, timeout_s, model = self._openai_request(path, prompt)
         timeout = aiohttp.ClientTimeout(total=timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(base, json=payload, headers=headers) as resp:
@@ -391,6 +486,65 @@ class DietPlugin(Star):
         )
         text = getattr(resp, "completion_text", "") or ""
         return str(text), "astrbot:" + provider_id
+
+    async def _stream_model(self, path: Path | None, note: str = ""):
+        """异步生成器，逐段产出模型输出。
+
+        只在 openai_compatible 模式下做真正的增量读取；
+        astrbot_provider 模式拿不到流式接口，退化为一次性产出（内容不变，只是不分段）。
+        """
+        mode = str(self.config.get("llm_mode") or "openai_compatible")
+        if path is None:
+            prompt = str(self.config.get("analyze_prompt_text") or "").strip() or TEXT_PROMPT
+        else:
+            prompt = str(self.config.get("analyze_prompt") or "").strip() or DEFAULT_PROMPT
+        note = (note or "").strip()
+        if note:
+            prompt = prompt + "\n\n用户的补充说明：" + note
+
+        if mode != "openai_compatible":
+            text, engine = await self._analyze(path, note)
+            yield ("meta", engine)
+            yield ("delta", json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else str(text))
+            return
+
+        base, payload, headers, timeout_s, model = self._openai_request(path, prompt, stream=True)
+        # 流式响应间隔可能较长，sock_read 单独放宽
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=30.0, sock_read=timeout_s)
+        yielded_any = False
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(base, json=payload, headers=headers) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError("HTTP %s: %s" % (resp.status, body[:300]))
+                async for raw in resp.content:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = obj.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    piece = delta.get("content")
+                    if isinstance(piece, list):
+                        piece = "".join(
+                            p.get("text", "") for p in piece if isinstance(p, dict)
+                        )
+                    if not piece:
+                        continue
+                    if not yielded_any:
+                        yield ("meta", "openai:" + (model or "unknown"))
+                        yielded_any = True
+                    yield ("delta", str(piece))
+        if not yielded_any:
+            yield ("meta", "openai:" + (model or "unknown"))
 
     @staticmethod
     def _parse_json(text: str) -> dict:
@@ -466,6 +620,15 @@ class DietPlugin(Star):
                 "version": PLUGIN_VERSION,
                 "server_time": int(time.time()),
                 "data_dir": str(self.data_dir),
+                # 供 APP 探测能力，缺失的功能可自动降级
+                "features": {
+                    "stream": bool(WEB_API and stream_response is not None),
+                    "summary": True,
+                    "targets": True,
+                    "text": True,
+                    "archive": True,
+                },
+                "targets": self._targets(),
             }
         )
 
@@ -543,6 +706,147 @@ class DietPlugin(Star):
         self._append_record(day, record)
         logger.info("[diet] 已记录文字饮食：%s（%s kcal）", text[:30], record["calories_kcal"])
         return json_response({"ok": True, "record": record})
+
+    async def _stream_analyze(self, path, note, day, photo_name, source, moment):
+        """流式分析的 SSE 事件序列：start -> meta* -> delta* -> done|error。"""
+        yield self._sse({"type": "start", "time": moment.strftime("%H:%M")})
+        buf: list[str] = []
+        engine = ""
+        try:
+            async for kind, value in self._stream_model(path, note):
+                if kind == "meta":
+                    engine = str(value)
+                    yield self._sse({"type": "meta", "engine": engine})
+                else:
+                    buf.append(str(value))
+                    yield self._sse({"type": "delta", "text": value})
+        except Exception as exc:  # noqa: BLE001 - 错误要回传给客户端
+            logger.error("[diet] 流式分析失败: %s", exc, exc_info=True)
+            yield self._sse({"type": "error", "message": str(exc)[:300]})
+            return
+
+        parsed = self._parse_json("".join(buf))
+        parsed["_engine"] = engine or "stream"
+        record = self._build_record(
+            moment, day, photo_name, parsed, source=source, note=note
+        )
+        self._append_record(day, record)
+        logger.info("[diet] 流式归档 %s，%s kcal", photo_name or "(文字)", record["calories_kcal"])
+        yield self._sse({"type": "done", "record": record})
+
+    async def api_analyze_stream(self):
+        """与 /analyze 相同，但以 SSE 逐步返回模型输出。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        if not WEB_API or stream_response is None:
+            return error_response("当前 AstrBot 版本不支持流式响应")
+        try:
+            files = await request.files()
+        except Exception as exc:  # noqa: BLE001
+            return error_response("解析上传内容失败: " + str(exc)[:200])
+
+        upload = _pick(files, "file")
+        if upload is None and files:
+            try:
+                upload = next(iter(files.values()))
+            except (StopIteration, TypeError):
+                upload = None
+        if upload is None:
+            return error_response("缺少文件字段 file")
+
+        note = ""
+        try:
+            form = await request.form()
+            note = str(_pick(form, "note", "") or "")
+        except Exception:  # noqa: BLE001
+            note = ""
+
+        target, name, day = self._save_photo(upload)
+        try:
+            await upload.save(target)
+        except Exception as exc:  # noqa: BLE001
+            return error_response("保存照片失败: " + str(exc)[:200])
+
+        size = target.stat().st_size if target.exists() else 0
+        if size == 0:
+            target.unlink(missing_ok=True)
+            return error_response("上传内容为空")
+        if size > MAX_UPLOAD_BYTES:
+            target.unlink(missing_ok=True)
+            return error_response("图片过大")
+
+        moment = dt.datetime.now(self.tz)
+        return stream_response(
+            self._stream_analyze(target, note, day, name, "app", moment)
+        )
+
+    async def api_analyze_text_stream(self):
+        """与 /analyze_text 相同，但以 SSE 逐步返回模型输出。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        if not WEB_API or stream_response is None:
+            return error_response("当前 AstrBot 版本不支持流式响应")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+        text = str(_pick(payload, "text", "") or "").strip()
+        if not text:
+            return error_response("缺少 text")
+        if len(text) > MAX_TEXT_CHARS:
+            return error_response("文字过长（上限 %d 字）" % MAX_TEXT_CHARS)
+
+        moment = dt.datetime.now(self.tz)
+        day = moment.strftime("%Y-%m-%d")
+        return stream_response(
+            self._stream_analyze(None, text, day, "", "app-text", moment)
+        )
+
+    async def api_summary(self):
+        """主页用：当天摄入合计、每日目标与记录明细。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        day = str(_pick(request.query, "date", "") or self._today())
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return error_response("date 格式应为 YYYY-MM-DD")
+        records = self._load_records(day)
+        return json_response(
+            {
+                "ok": True,
+                "date": day,
+                "count": len(records),
+                "totals": self._totals(records),
+                "targets": self._targets(),
+                "records": records,
+            }
+        )
+
+    async def api_targets(self):
+        """由 APP 调整每日目标，存入 state.json（不动 AstrBot 的插件配置）。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+        state = self._load_state()
+        current = dict(state.get("targets") or {})
+        updated: dict[str, float] = {}
+        for key in DEFAULT_TARGETS:
+            raw = _pick(payload, key, None)
+            if raw is None or raw == "":
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return error_response("%s 必须是数字" % key)
+            if not (0 <= value <= 100000):
+                return error_response("%s 超出合理范围" % key)
+            current[key] = value
+            updated[key] = value
+        if not updated:
+            return error_response("没有可更新的目标字段")
+        state["targets"] = current
+        self._save_state(state)
+        return json_response({"ok": True, "updated": updated, "targets": self._targets()})
 
     async def api_archive(self):
         if not self._authorized():
@@ -707,19 +1011,11 @@ class DietPlugin(Star):
         umo = getattr(event, "unified_msg_origin", "") or ""
         if not umo:
             return
-        state_file = self.data_dir / "state.json"
-        try:
-            state = {}
-            if state_file.exists():
-                state = json.loads(state_file.read_text(encoding="utf-8")) or {}
-            if state.get("last_umo") != umo:
-                state["last_umo"] = umo
-                state["updated_at"] = int(time.time())
-                state_file.write_text(
-                    json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-        except (OSError, json.JSONDecodeError):
-            pass
+        state = self._load_state()
+        if state.get("last_umo") != umo:
+            state["last_umo"] = umo
+            state["updated_at"] = int(time.time())
+            self._save_state(state)
 
     @filter.command("饮食")
     async def cmd_diet(self, event: AstrMessageEvent, *_ignored):
