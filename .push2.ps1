@@ -1,15 +1,16 @@
 $ErrorActionPreference = "Continue"
+git rm -q --cached .gitmsg.tmp tools/_push.ps1 2>$null
+Remove-Item .gitmsg.tmp, tools\_push.ps1 -Force -ErrorAction SilentlyContinue
 git add -A
 Write-Output "=== 待提交 ==="
 git status --short
-git commit -q -F .gitmsg.tmp
+git commit -q -m "chore: 移除误提交的临时文件"
 Write-Output ("commit exit=" + $LASTEXITCODE)
-Remove-Item .gitmsg.tmp -Force
 
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-public class CredMan6 {
+public class CredMan7 {
   [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode, EntryPoint="CredReadW")]
   private static extern bool CredRead(string target, int type, int flags, out IntPtr credential);
   [DllImport("advapi32.dll", EntryPoint="CredFree")]
@@ -32,15 +33,12 @@ public class CredMan6 {
   }
 }
 '@
-$bytes = [CredMan6]::Read("git:https://github.com")
+$bytes = [CredMan7]::Read("git:https://github.com")
 $env:GHTOK = ([Text.Encoding]::Unicode.GetString($bytes)).Trim()
-$ask = Join-Path (Get-Location).Path ".gittmp_askpass.cmd"
+$ask = Join-Path (Get-Location).Path ".gtmp.cmd"
 Set-Content -Path $ask -Value "@echo off`r`necho %GHTOK%`r`n" -Encoding ASCII
 $env:GIT_ASKPASS = $ask
 $env:GIT_TERMINAL_PROMPT = "0"
-
-Write-Output ""
-Write-Output "=== 推送 ==="
-git -c credential.helper= -c http.sslBackend=openssl push origin main 2>&1
+git -c credential.helper= -c http.sslBackend=openssl push origin main 2>&1 | Select-Object -Last 2
 Write-Output ("push exit=" + $LASTEXITCODE)
 Remove-Item $ask -Force -ErrorAction SilentlyContinue
