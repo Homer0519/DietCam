@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - 兼容旧版本
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.0.2"
+PLUGIN_VERSION = "1.0.3"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
@@ -79,6 +79,29 @@ JSON 结构如下：
 2. 用户对份量的描述可能很模糊（例如"一碗面"），按常见份量估算，并在 confidence 里体现不确定性。
 3. 如果描述明显不完整（例如只写了"吃了饭"），照样给出估算，但在 advice 里点出缺了什么信息会算得更准。
 4. 只输出 JSON，不要有多余字符。"""
+
+
+def _pick(mapping: Any, key: str, default: Any = None) -> Any:
+    """从请求的映射对象里安全取值。
+
+    重要：AstrBot 的 PluginMultiDict（query / form / files 的返回类型）
+    不是 dict 的子类，所以绝对不能用 isinstance(x, dict) 来判断，
+    否则会静默取不到值——曾因此把上传的文件整个丢掉。
+    """
+    if mapping is None:
+        return default
+    getter = getattr(mapping, "get", None)
+    if callable(getter):
+        try:
+            return getter(key, default)
+        except TypeError:
+            try:
+                return getter(key)
+            except Exception:  # noqa: BLE001
+                return default
+        except Exception:  # noqa: BLE001
+            return default
+    return default
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -454,19 +477,20 @@ class DietPlugin(Star):
         except Exception as exc:  # noqa: BLE001
             return error_response("解析上传内容失败: " + str(exc)[:200])
 
-        upload = None
-        if isinstance(files, dict):
-            upload = files.get("file")
-            if upload is None and files:
+        upload = _pick(files, "file")
+        if upload is None and files:
+            # 客户端用了别的字段名也认，尽量别让它白跑一趟
+            try:
                 upload = next(iter(files.values()))
+            except (StopIteration, TypeError):
+                upload = None
         if upload is None:
             return error_response("缺少文件字段 file")
 
         note = ""
         try:
             form = await request.form()
-            if isinstance(form, dict):
-                note = str(form.get("note") or "")
+            note = str(_pick(form, "note", "") or "")
         except Exception:  # noqa: BLE001
             note = ""
 
@@ -502,9 +526,9 @@ class DietPlugin(Star):
         if not self._authorized():
             return error_response("unauthorized")
         payload = await request.json(default={})
-        if not isinstance(payload, dict):
-            return error_response("请求体必须是 JSON 对象")
-        text = str(payload.get("text") or "").strip()
+        if not hasattr(payload, "get"):
+            payload = {}
+        text = str(_pick(payload, "text", "") or "").strip()
         if not text:
             return error_response("缺少 text")
         if len(text) > MAX_TEXT_CHARS:
@@ -524,9 +548,9 @@ class DietPlugin(Star):
         if not self._authorized():
             return error_response("unauthorized")
         payload = await request.json(default={})
-        if not isinstance(payload, dict):
-            return error_response("请求体必须是 JSON 对象")
-        raw_b64 = str(payload.get("content_base64") or "")
+        if not hasattr(payload, "get"):
+            payload = {}
+        raw_b64 = str(_pick(payload, "content_base64", "") or "")
         if not raw_b64:
             return error_response("缺少 content_base64")
         try:
@@ -542,20 +566,20 @@ class DietPlugin(Star):
         day = moment.strftime("%Y-%m-%d")
         day_dir = self.photo_dir / day
         day_dir.mkdir(parents=True, exist_ok=True)
-        suffix = Path(str(payload.get("filename") or "photo.jpg")).suffix.lower()
+        suffix = Path(str(_pick(payload, "filename", "photo.jpg") or "photo.jpg")).suffix.lower()
         if suffix not in ALLOWED_SUFFIX:
             suffix = ".jpg"
         name = moment.strftime("%H%M%S") + "_" + uuid.uuid4().hex[:8] + suffix
         target = day_dir / name
         target.write_bytes(blob)
 
-        if not payload.get("analyze", True):
+        if _pick(payload, "analyze", True) is False:
             return json_response({"ok": True, "saved": name, "date": day})
 
-        note = str(payload.get("note") or "")
+        note = str(_pick(payload, "note", "") or "")
         result = await self._analyze(target, note=note)
         record = self._build_record(
-            moment, day, name, result, source=str(payload.get("source") or "app-retry"),
+            moment, day, name, result, source=str(_pick(payload, "source", "") or "app-retry"),
             note=note,
         )
         self._append_record(day, record)
@@ -564,7 +588,7 @@ class DietPlugin(Star):
     async def api_records(self):
         if not self._authorized():
             return error_response("unauthorized")
-        day = str(request.query.get("date") or self._today())
+        day = str(_pick(request.query, "date", "") or self._today())
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
             return error_response("date 格式应为 YYYY-MM-DD")
         records = self._load_records(day)
@@ -581,8 +605,8 @@ class DietPlugin(Star):
     async def api_photo(self):
         if not self._authorized():
             return error_response("unauthorized")
-        day = str(request.query.get("date") or "")
-        name = str(request.query.get("name") or "")
+        day = str(_pick(request.query, "date", "") or "")
+        name = str(_pick(request.query, "name", "") or "")
         path = self._safe_photo(day, name)
         if path is None or not path.is_file():
             return error_response("not found")

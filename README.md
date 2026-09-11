@@ -126,17 +126,26 @@ python tools/bump_version.py --show    # 查看当前版本
 
 不是"写完就交"，下面这些是实际跑出来的结果：
 
-**AstrBot 插件 — 53 项逻辑自测全部通过**
+**AstrBot 插件 — 107 项测试全部通过**
 
 ```bash
-python tools/plugin_selftest.py     # 通过 53 项，失败 0 项
+python tools/run_all_checks.py      # 一键跑完下面全部检查
 ```
 
-覆盖：模型输出 JSON 解析（含代码块包裹、混杂文本、垃圾输出、空输出）、
-记录构造与数值容错、jsonl 读写、营养汇总、HMAC 鉴权（合法/篡改/过期/缺失/错误密钥）、
-路径穿越防护、餐次推断、日报与区间渲染、非法配置容错，
-以及**纯文字模式**（不传图片、使用文字提示词、描述拼入提示词）与
-**拍照+备注模式**（备注进入提示词、图片路径正常传递）、日报区分 ✍️/📷 记录。
+| 检查 | 说明 |
+| --- | --- |
+| `tools/plugin_selftest.py` | 107 项单元 + 端到端测试 |
+| `tools/verify_regression.py` | 验证测试本身有效（能区分修复前后） |
+| `tools/demo_plugin.py` | 端到端演示，兼作冒烟测试 |
+
+测试跑在 `tools/astrbot_stub.py` 上——一个**忠实模拟** AstrBot 的桩，
+关键在于它复刻了 `PluginMultiDict` **不是 dict 子类**这一事实
+（早期用普通 dict 冒充请求对象，导致一个真实 bug 被测试掩盖，详见下节）。
+
+覆盖范围：模型输出 JSON 解析、记录构造与数值容错、jsonl 读写、营养汇总、
+HMAC 鉴权（合法/篡改/过期/缺失/空签名/换密钥）、路径穿越防护、餐次推断、
+日报与区间渲染、配置容错，以及**六个接口的完整端到端调用**：
+正常路径、缺字段、空文件、超大文件、非法参数、无凭据、错误字段名。
 
 接口调用方式逐条对照过 AstrBot 源码验证：
 `astrbot.api.web` 的 `json_response / error_response / file_response` 签名、
@@ -151,6 +160,16 @@ python tools/demo_plugin.py
 
 会合成一张炒饭照片、走完"上传 → 落盘 → 分析 → 查询 → 取回"全流程，
 并打印 `/饮食` 指令的真实输出与磁盘文件结构，不需要任何模型服务。
+
+**已修复的真实问题（1.0.3）**
+
+上线后点击拍照报 `缺少文件字段 file`。根因是 AstrBot 的 `PluginMultiDict`
+**不是 `dict` 子类**，而插件里用了 `isinstance(files, dict)` 判断——恒为 False，
+导致上传的文件和备注被静默丢弃。同一处写法还让「拍照+备注」的备注从未送达模型。
+
+修复方式是不再判断类型，改用鸭子类型取值（`_pick`）。
+`tools/verify_regression.py` 会把这个 bug 还原到一份副本上，
+确认测试确实能复现它（复现结果：`400 缺少文件字段 file`）。
 
 **Android 端 — 真实编译出包**
 
