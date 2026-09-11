@@ -84,7 +84,12 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun submit(file: File) {
+    /** 纯文字记录。 */
+    fun submitText(text: String) {
+        val desc = text.trim()
+        if (desc.isEmpty()) {
+            return
+        }
         val current = store.snapshot()
         if (current.baseUrl.isBlank() || current.secret.isBlank()) {
             _state.value = DietState.Failed("请先点右上角设置，填写服务器地址与签名密钥", now())
@@ -93,7 +98,24 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = DietState.Uploading
         viewModelScope.launch {
             try {
-                val json = DietApi(current).analyze(file, "")
+                val json = DietApi(current).analyzeText(desc)
+                _state.value = DietState.Success(parse(json), now())
+            } catch (e: Exception) {
+                _state.value = DietState.Failed(e.message ?: "未知错误", now())
+            }
+        }
+    }
+
+    fun submit(file: File, note: String = "") {
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank() || current.secret.isBlank()) {
+            _state.value = DietState.Failed("请先点右上角设置，填写服务器地址与签名密钥", now())
+            return
+        }
+        _state.value = DietState.Uploading
+        viewModelScope.launch {
+            try {
+                val json = DietApi(current).analyze(file, note)
                 _state.value = DietState.Success(parse(json), now())
             } catch (e: Exception) {
                 _state.value = DietState.Failed(e.message ?: "未知错误", now())

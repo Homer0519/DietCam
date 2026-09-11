@@ -1,6 +1,6 @@
 # DietCam · 拍照饮食管理
 
-用手机拍一张餐食照片 → 送到你自己的视觉大模型做营养分析 → 结果**以文件形式归档到 AstrBot 服务器**，
+用手机拍照片、或直接打字描述 → 送到你自己的视觉大模型做营养分析 → 结果**以文件形式归档到 AstrBot 服务器**，
 不占用、也不污染任何聊天上下文；需要时用 `/饮食` 指令主动查看日报和汇总。
 
 ## 为什么这样设计
@@ -52,6 +52,10 @@
 | 操作 | 结果 |
 | --- | --- |
 | 拍一张餐食照片 | 自动分析并以卡片显示热量与三大营养素，同时归档到当天 |
+| **在输入框打字后按 ➤** | **不拍照也能记录**，直接描述吃了什么即可分析（如"中午吃了一碗牛肉面"） |
+| 打字 + 拍照 | 文字作为补充说明一起交给模型，估算更准（如"这是一人份""少油"） |
+| 在输入框打字后按 ➤ | **不拍照也能记录**，直接描述吃了什么即可分析（如"中午吃了一碗牛肉面"） |
+| 打字 + 拍照 | 文字会作为补充说明一起交给模型，估算更准（如"这是一人份"） |
 | `/饮食` | 今天的饮食日报 |
 | `/饮食 昨天` | 昨天的日报 |
 | `/饮食 2026-06-27` | 指定日期 |
@@ -69,6 +73,9 @@ astrbot_plugin_diet/
 ├── records/2026-06-27.jsonl                当天记录（一行一条 JSON）
 └── state.json                              最近会话标识等状态
 ```
+
+纯文字记录不产生照片文件，在 jsonl 里表现为 `photo` 为空、`source` 为 `app-text`、
+`note` 保留你的原始描述；日报里用 ✍️ 与照片记录（📷）区分。
 
 想换存储位置，直接把这个目录软链到你想要的地方即可。
 
@@ -118,15 +125,17 @@ python tools/bump_version.py --show    # 查看当前版本
 
 不是"写完就交"，下面这些是实际跑出来的结果：
 
-**AstrBot 插件 — 39 项逻辑自测全部通过**
+**AstrBot 插件 — 53 项逻辑自测全部通过**
 
 ```bash
-python tools/plugin_selftest.py     # 通过 39 项，失败 0 项
+python tools/plugin_selftest.py     # 通过 53 项，失败 0 项
 ```
 
 覆盖：模型输出 JSON 解析（含代码块包裹、混杂文本、垃圾输出、空输出）、
 记录构造与数值容错、jsonl 读写、营养汇总、HMAC 鉴权（合法/篡改/过期/缺失/错误密钥）、
-路径穿越防护、餐次推断、日报与区间渲染、非法配置容错。
+路径穿越防护、餐次推断、日报与区间渲染、非法配置容错，
+以及**纯文字模式**（不传图片、使用文字提示词、描述拼入提示词）与
+**拍照+备注模式**（备注进入提示词、图片路径正常传递）、日报区分 ✍️/📷 记录。
 
 接口调用方式逐条对照过 AstrBot 源码验证：
 `astrbot.api.web` 的 `json_response / error_response / file_response` 签名、
@@ -151,17 +160,17 @@ BUILD SUCCESSFUL in 34s
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-1.0.0-release.apk`（12.24 MB） |
-| 包名 / 版本 | `com.dietcam.app` v1.0.0 (versionCode 1) |
+| 产物 | `dist/DietCam-1.0.1-release.apk`（12.24 MB） |
+| 包名 / 版本 | `com.dietcam.app` v1.0.1 (versionCode 2) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
 | 签名方案 | APK Signature Scheme v2 + v3 均已校验通过 |
 | 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（跨构建稳定） |
-| SHA-256 | `1C5D983CE3C92991490A9EAA7B76C317B01B2206127294B2B6BD22CAE50BA809` |
+| SHA-256 | `AEEE3F3BE390CDD1FBCD40D73884A441A69482BE85CAD158FA6D1EA04AD1FFAD` |
 
-**升级路径实测** —— 用 `bump_version.py` 升到 1.0.1 重新构建，逐一核对升级三要素：
+**升级路径实测** —— 1.0.1（新增文字输入）由 `bump_version.py` 递增后构建，逐一核对升级三要素：
 
 | | 1.0.0 | 1.0.1 |
 | --- | --- | --- |

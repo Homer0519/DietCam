@@ -67,5 +67,11 @@
     "description": "自定义分析提示词",
     "type": "text",
     "default": ""
+  },
+  "analyze_prompt_text": {
+    "description": "纯文字模式的分析提示词",
+    "type": "text",
+    "default": "",
+    "hint": "APP 里不拍照、直接打字描述吃了什么时使用；留空用内置营养师提示词"
   }
 }

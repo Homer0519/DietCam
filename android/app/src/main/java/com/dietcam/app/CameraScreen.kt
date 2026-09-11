@@ -11,6 +11,8 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -37,6 +40,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -52,6 +56,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -76,6 +81,7 @@ fun DietCameraScreen(vm: DietViewModel) {
     val configVersion by vm.configVersion.collectAsStateWithLifecycle()
 
     var showSettings by remember { mutableStateOf(false) }
+    var noteText by remember { mutableStateOf("") }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var lensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var hasPermission by remember {
@@ -173,12 +179,18 @@ fun DietCameraScreen(vm: DietViewModel) {
         }
 
         when (val current = state) {
-            is DietState.Idle -> ShutterBar(
+            is DietState.Idle -> CaptureBar(
                 modifier = Modifier.align(Alignment.BottomCenter),
+                note = noteText,
+                onNoteChange = { noteText = it },
+                onSendText = {
+                    vm.submitText(noteText)
+                    noteText = ""
+                },
                 onCapture = {
                     val capture = imageCapture
                     if (capture == null) {
-                        return@ShutterBar
+                        return@CaptureBar
                     }
                     val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
                     val file = File(context.cacheDir, "meal_" + stamp + ".jpg")
@@ -188,7 +200,9 @@ fun DietCameraScreen(vm: DietViewModel) {
                         ContextCompat.getMainExecutor(context),
                         object : ImageCapture.OnImageSavedCallback {
                             override fun onImageSaved(results: ImageCapture.OutputFileResults) {
-                                vm.submit(file)
+                                // 输入框里的文字作为这餐的补充说明一起送出去
+                                vm.submit(file, noteText.trim())
+                                noteText = ""
                             }
 
                             override fun onError(exception: ImageCaptureException) {
@@ -220,7 +234,10 @@ fun DietCameraScreen(vm: DietViewModel) {
             is DietState.Success -> ResultCard(
                 modifier = Modifier.align(Alignment.BottomCenter),
                 result = current.result,
-                onRetake = { vm.reset() },
+                onRetake = {
+                    noteText = ""
+                    vm.reset()
+                },
             )
 
             is DietState.Failed -> ErrorCard(
@@ -246,43 +263,86 @@ fun DietCameraScreen(vm: DietViewModel) {
 }
 
 @Composable
-private fun ShutterBar(
+private fun CaptureBar(
     modifier: Modifier = Modifier,
+    note: String,
+    onNoteChange: (String) -> Unit,
+    onSendText: () -> Unit,
     onCapture: () -> Unit,
     onPick: () -> Unit,
 ) {
-    Row(
-        modifier = modifier.fillMaxWidth().padding(bottom = 40.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
+    val canSend = note.isNotBlank()
+
+    Column(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        IconButton(onClick = onPick) {
-            Icon(Icons.Filled.PhotoLibrary, contentDescription = "从相册选择", tint = Color.White)
-        }
-        Spacer(Modifier.width(36.dp))
-        Box(
-            modifier = Modifier
-                .size(78.dp)
-                .clip(CircleShape)
-                .background(Color.White),
-            contentAlignment = Alignment.Center,
+        // ── 文字输入：不拍照也能直接描述这一餐 ──────────────────────────
+        OutlinedTextField(
+            value = note,
+            onValueChange = onNoteChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = {
+                Text("也可以直接打字，例如：中午吃了一碗牛肉面", fontSize = 14.sp, color = Muted)
+            },
+            trailingIcon = {
+                IconButton(onClick = onSendText, enabled = canSend) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "记录这段文字",
+                        tint = if (canSend) Accent else Muted,
+                    )
+                }
+            },
+            maxLines = 3,
+            shape = RoundedCornerShape(16.dp),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { if (canSend) onSendText() }),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedContainerColor = Color(0xE61B1B21),
+                unfocusedContainerColor = Color(0xE61B1B21),
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                focusedBorderColor = Accent,
+                unfocusedBorderColor = Color(0xFF3A3A44),
+                cursorColor = Accent,
+            ),
+        )
+
+        Text(
+            "拍照，或打字后再按一下 ➤",
+            color = Muted,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 6.dp, bottom = 10.dp),
+        )
+
+        // ── 快门 ────────────────────────────────────────────────────
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
+            IconButton(onClick = onPick) {
+                Icon(Icons.Filled.PhotoLibrary, contentDescription = "从相册选择", tint = Color.White)
+            }
+            Spacer(Modifier.width(36.dp))
             Box(
                 modifier = Modifier
                     .size(78.dp)
                     .clip(CircleShape)
                     .background(Color.White)
-                    .padding(6.dp)
+                    .padding(6.dp),
             ) {
                 Button(
                     onClick = onCapture,
                     modifier = Modifier.fillMaxSize().clip(CircleShape),
                     shape = CircleShape,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
                     colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = Accent),
                 ) { }
             }
+            Spacer(Modifier.width(96.dp))
         }
-        Spacer(Modifier.width(96.dp))
     }
 }
 

@@ -7,6 +7,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -51,6 +52,7 @@ class DietApi(private val settings: DietSettings) {
         execute(newRequest(endpoint("/health")).get().build())
     }
 
+    /** 上传照片做分析；note 会作为补充说明一起交给模型。 */
     suspend fun analyze(file: File, note: String): JSONObject = withContext(Dispatchers.IO) {
         val form = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
@@ -59,6 +61,15 @@ class DietApi(private val settings: DietSettings) {
             form.addFormDataPart("note", note)
         }
         val request = newRequest(endpoint("/analyze")).post(form.build()).build()
+        execute(request)
+    }
+
+    /** 纯文字记录：不拍照，直接描述吃了什么。 */
+    suspend fun analyzeText(text: String): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("text", text)
+        val request = newRequest(endpoint("/analyze_text"))
+            .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
         execute(request)
     }
 

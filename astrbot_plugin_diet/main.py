@@ -51,8 +51,9 @@ except Exception:  # pragma: no cover - 兼容旧版本
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
+MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
 DEFAULT_PROMPT = """你是一位严谨、友善的专业营养师。请仔细观察这张餐食照片，估算每种食物的份量与营养，并**只输出一个 JSON 对象**，不要输出任何解释文字，也不要用 Markdown 代码块包裹。
@@ -66,6 +67,18 @@ JSON 结构如下：
 3. confidence 是 0 到 1 之间的置信度。
 4. advice 要具体（例如"蛋白质偏少，可以加一个鸡蛋或一杯无糖酸奶"），不要说空话。
 5. 只输出 JSON，不要有多余字符。"""
+
+
+TEXT_PROMPT = """你是一位严谨、友善的专业营养师。用户没有拍照，而是用文字描述了自己吃了什么。请根据这段描述估算份量与营养，并**只输出一个 JSON 对象**，不要输出任何解释文字，也不要用 Markdown 代码块包裹。
+
+JSON 结构如下：
+{"is_food":true,"title":"一句话概括这一餐","meal":"早餐或午餐或晚餐或加餐或零食","items":[{"name":"食物名","portion":"约150g","calories_kcal":230,"protein_g":12.5,"carbs_g":30.0,"fat_g":6.0}],"calories_kcal":520,"protein_g":30.0,"carbs_g":60.0,"fat_g":18.0,"confidence":0.6,"advice":"一句简短、具体、友善的建议"}
+
+要求：
+1. 描述里没有食物的，返回 {"is_food": false, "reason": "简短原因"}。
+2. 用户对份量的描述可能很模糊（例如"一碗面"），按常见份量估算，并在 confidence 里体现不确定性。
+3. 如果描述明显不完整（例如只写了"吃了饭"），照样给出估算，但在 advice 里点出缺了什么信息会算得更准。
+4. 只输出 JSON，不要有多余字符。"""
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -110,6 +123,7 @@ class DietPlugin(Star):
         routes = [
             (prefix + "/health", self.api_health, ["GET"], "diet health check"),
             (prefix + "/analyze", self.api_analyze, ["POST"], "analyze a meal photo"),
+            (prefix + "/analyze_text", self.api_analyze_text, ["POST"], "analyze a typed meal description"),
             (prefix + "/archive", self.api_archive, ["POST"], "archive a photo (base64)"),
             (prefix + "/records", self.api_records, ["GET"], "list one day records"),
             (prefix + "/photo", self.api_photo, ["GET"], "fetch an archived photo"),
@@ -240,9 +254,20 @@ class DietPlugin(Star):
 
     # ------------------------------------------------------------------ 分析
 
-    async def _analyze(self, path: Path) -> dict:
+    async def _analyze(self, path: Path | None = None, note: str = "") -> dict:
+        """分析一餐。
+
+        path 为 None 时表示纯文字模式（用户直接打字描述吃了什么）；
+        否则以照片为主，note 作为补充说明一起交给模型。
+        """
         mode = str(self.config.get("llm_mode") or "openai_compatible")
-        prompt = str(self.config.get("analyze_prompt") or "").strip() or DEFAULT_PROMPT
+        if path is None:
+            prompt = str(self.config.get("analyze_prompt_text") or "").strip() or TEXT_PROMPT
+        else:
+            prompt = str(self.config.get("analyze_prompt") or "").strip() or DEFAULT_PROMPT
+        note = (note or "").strip()
+        if note:
+            prompt = prompt + "\n\n用户的补充说明：" + note
         try:
             if mode == "astrbot_provider":
                 text, engine = await self._analyze_via_astrbot(path, prompt)
@@ -254,7 +279,7 @@ class DietPlugin(Star):
                 "is_food": True,
                 "title": "分析失败",
                 "items": [],
-                "advice": "视觉模型调用失败：" + str(exc)[:200],
+                "advice": "模型调用失败：" + str(exc)[:200],
                 "error": str(exc)[:500],
                 "_engine": mode,
             }
@@ -262,7 +287,7 @@ class DietPlugin(Star):
         parsed["_engine"] = engine
         return parsed
 
-    async def _analyze_openai(self, path: Path, prompt: str) -> tuple[str, str]:
+    async def _analyze_openai(self, path: Path | None, prompt: str) -> tuple[str, str]:
         base = str(self.config.get("base_url") or "").strip().rstrip("/")
         if not base:
             raise RuntimeError("base_url 未配置")
@@ -276,22 +301,16 @@ class DietPlugin(Star):
             headers["Authorization"] = "Bearer " + key
         headers.update(self._json_conf("extra_headers"))
 
-        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        if path is not None:
+            mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+            b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+            content.append(
+                {"type": "image_url", "image_url": {"url": "data:" + mime + ";base64," + b64}}
+            )
         payload: dict[str, Any] = {
             "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "data:" + mime + ";base64," + b64},
-                        },
-                    ],
-                }
-            ],
+            "messages": [{"role": "user", "content": content}],
             "temperature": 0.2,
             "max_tokens": 1024,
         }
@@ -318,7 +337,7 @@ class DietPlugin(Star):
             )
         return str(text or ""), "openai:" + (model or "unknown")
 
-    async def _analyze_via_astrbot(self, path: Path, prompt: str) -> tuple[str, str]:
+    async def _analyze_via_astrbot(self, path: Path | None, prompt: str) -> tuple[str, str]:
         provider_id = str(self.config.get("astrbot_provider_id") or "").strip()
         if not provider_id:
             provider = None
@@ -337,12 +356,15 @@ class DietPlugin(Star):
         if not provider_id:
             raise RuntimeError("无法确定提供商 ID，请在插件配置里填写 astrbot_provider_id")
 
-        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
-        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        image_urls: list[str] | None = None
+        if path is not None:
+            mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+            b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+            image_urls = ["data:" + mime + ";base64," + b64]
         resp = await self.context.llm_generate(
             chat_provider_id=provider_id,
             prompt=prompt,
-            image_urls=["data:" + mime + ";base64," + b64],
+            image_urls=image_urls,
         )
         text = getattr(resp, "completion_text", "") or ""
         return str(text), "astrbot:" + provider_id
@@ -464,7 +486,7 @@ class DietPlugin(Star):
             return error_response("图片过大")
 
         moment = dt.datetime.now(self.tz)
-        result = await self._analyze(target)
+        result = await self._analyze(target, note=note)
         record = self._build_record(moment, day, name, result, source="app", note=note)
         self._append_record(day, record)
         logger.info(
@@ -473,6 +495,29 @@ class DietPlugin(Star):
             size,
             record["calories_kcal"],
         )
+        return json_response({"ok": True, "record": record})
+
+    async def api_analyze_text(self):
+        """纯文字记录：用户直接打字描述吃了什么。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return error_response("缺少 text")
+        if len(text) > MAX_TEXT_CHARS:
+            return error_response("文字过长（上限 %d 字）" % MAX_TEXT_CHARS)
+
+        moment = dt.datetime.now(self.tz)
+        day = moment.strftime("%Y-%m-%d")
+        result = await self._analyze(None, note=text)
+        record = self._build_record(
+            moment, day, "", result, source="app-text", note=text
+        )
+        self._append_record(day, record)
+        logger.info("[diet] 已记录文字饮食：%s（%s kcal）", text[:30], record["calories_kcal"])
         return json_response({"ok": True, "record": record})
 
     async def api_archive(self):
@@ -507,10 +552,11 @@ class DietPlugin(Star):
         if not payload.get("analyze", True):
             return json_response({"ok": True, "saved": name, "date": day})
 
-        result = await self._analyze(target)
+        note = str(payload.get("note") or "")
+        result = await self._analyze(target, note=note)
         record = self._build_record(
             moment, day, name, result, source=str(payload.get("source") or "app-retry"),
-            note=str(payload.get("note") or ""),
+            note=note,
         )
         self._append_record(day, record)
         return json_response({"ok": True, "record": record})
@@ -551,7 +597,12 @@ class DietPlugin(Star):
         totals = self._totals(records)
         lines = ["🍽️ 饮食日报 · " + day, ""]
         for rec in records:
-            mark = "✅" if rec.get("is_food", True) else "❔"
+            if not rec.get("is_food", True):
+                mark = "❔"
+            elif rec.get("source") == "app-text":
+                mark = "✍️"   # 纯文字记录，没有照片
+            else:
+                mark = "📷"
             lines.append(
                 "%s %s %s｜%s · %g kcal"
                 % (

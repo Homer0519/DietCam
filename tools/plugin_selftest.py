@@ -221,6 +221,59 @@ except Exception as exc:
     check("非法时区降级为 UTC+8", False, exc)
 
 print()
+print("== 7. 纯文字模式 ==")
+import asyncio
+
+captured = {}
+
+async def _capture(path, prompt):
+    captured["path"] = path
+    captured["prompt"] = prompt
+    return json.dumps({
+        "is_food": True, "title": "牛肉面", "meal": "午餐",
+        "calories_kcal": 620, "protein_g": 28, "carbs_g": 78, "fat_g": 18,
+        "items": [{"name": "牛肉面", "portion": "1 碗", "calories_kcal": 620}],
+        "advice": "汤别喝完，钠偏高。",
+    }), "stub"
+
+plugin._analyze_openai = _capture
+res = asyncio.run(plugin._analyze(None, "中午吃了一碗牛肉面"))
+check("纯文字模式不传图片", captured.get("path") is None, captured.get("path"))
+check("纯文字模式使用文字提示词", "文字描述" in captured.get("prompt", ""), captured.get("prompt", "")[:80])
+check("用户描述被拼进提示词", "牛肉面" in captured.get("prompt", ""))
+check("纯文字结果解析正常", res.get("title") == "牛肉面", res)
+
+res2 = asyncio.run(plugin._analyze(Path("fake.jpg") if False else None, ""))
+check("无描述时不追加补充说明", "补充说明" not in captured.get("prompt", ""), captured.get("prompt", "")[-60:])
+
+# 照片 + 备注：备注应进入提示词
+captured.clear()
+async def _capture_img(path, prompt):
+    captured["path"] = path
+    captured["prompt"] = prompt
+    return json.dumps({"is_food": True, "title": "炒饭", "calories_kcal": 700}), "stub"
+plugin._analyze_openai = _capture_img
+(tmpimg := (TMP / "fake.jpg"))
+tmpimg.write_bytes(b"fake")
+asyncio.run(plugin._analyze(tmpimg, "这是我一个人吃的"))
+check("照片模式使用图片提示词", "餐食照片" in captured.get("prompt", ""), captured.get("prompt", "")[:60])
+check("照片模式带上补充说明", "一个人吃的" in captured.get("prompt", ""))
+check("照片模式确实传了路径", captured.get("path") is not None)
+
+rec_text = plugin._build_record(now, "2026-06-27", "", res, source="app-text", note="中午吃了一碗牛肉面")
+check("文字记录 photo 为空", rec_text["photo"] == "")
+check("文字记录带 source 标记", rec_text["source"] == "app-text")
+check("文字记录保留原始描述", rec_text["note"] == "中午吃了一碗牛肉面")
+
+plugin._append_record("2026-06-28", rec_text)
+report_text = plugin._render_day("2026-06-28")
+check("日报用 ✍️ 区分文字记录", "✍️" in report_text, report_text)
+check("日报含文字记录标题", "牛肉面" in report_text, report_text)
+
+report_img = plugin._render_day("2026-06-27")
+check("日报用 📷 区分照片记录", "📷" in report_img, report_img)
+
+print()
 print("=" * 52)
 print("通过 %d 项，失败 %d 项" % (len(PASS), len(FAIL)))
 if FAIL:

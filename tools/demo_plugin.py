@@ -223,6 +223,23 @@ SNACK = {
 _FakeContext = None
 
 
+TYPED_MEAL = {
+    "is_food": True,
+    "title": "无糖豆浆配茶叶蛋",
+    "meal": "加餐",
+    "items": [
+        {"name": "无糖豆浆", "portion": "1 杯 300ml", "calories_kcal": 90, "protein_g": 9.0, "carbs_g": 4.5, "fat_g": 3.5},
+        {"name": "茶叶蛋", "portion": "1 个", "calories_kcal": 78, "protein_g": 6.5, "carbs_g": 1.0, "fat_g": 5.0},
+    ],
+    "calories_kcal": 168,
+    "protein_g": 15.5,
+    "carbs_g": 5.5,
+    "fat_g": 8.5,
+    "confidence": 0.65,
+    "advice": "描述里没有主食，如果这是正餐建议补一点碳水；当作加餐则很合适。",
+}
+
+
 async def main() -> int:
     logger = create_environment()
     spec = importlib.util.spec_from_file_location("diet_main", PLUGIN_MAIN)
@@ -251,7 +268,7 @@ async def main() -> int:
     print()
 
     # 用桩函数替换真实的模型请求
-    queue = [FRIED_RICE, SNACK]
+    queue = [FRIED_RICE, SNACK, TYPED_MEAL]
     async def fake_analyze(path: Path, prompt: str):
         await asyncio.sleep(0)
         return json.dumps(queue.pop(0), ensure_ascii=False), "openai:qwen2.5-vl-7b-instruct (stub)"
@@ -316,6 +333,21 @@ async def main() -> int:
                 files={"file": _Upload("snack.png", make_png(240, 240))},
                 form={"note": ""})
     await plugin.api_analyze()
+
+    # --------------------------------------------- 2b. 纯文字记录（打字）
+    print()
+    print("[2b] POST /analyze_text   不拍照，直接打字描述")
+    typed = "下午喝了一杯无糖豆浆和一个茶叶蛋"
+    print("    输入：%s" % typed)
+    set_request(headers=auth_headers(), payload={"text": typed})
+    resp = await plugin.api_analyze_text()
+    print("    HTTP %d" % resp.status_code)
+    trec = resp.payload["record"]
+    print("      标题      %s" % trec["title"])
+    print("      热量      %g kcal（蛋白 %g / 碳水 %g / 脂肪 %g）"
+          % (trec["calories_kcal"], trec["protein_g"], trec["carbs_g"], trec["fat_g"]))
+    print("      建议      %s" % trec["advice"])
+    print("      归档字段  photo=%r  source=%r" % (trec["photo"], trec["source"]))
 
     # --------------------------------------------------------- 3. records
     day = dt.datetime.now(plugin.tz).strftime("%Y-%m-%d")
