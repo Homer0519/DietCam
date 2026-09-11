@@ -12,9 +12,14 @@ captures/
 # 本机构建工具链（体积很大，不要提交）
 .toolchain/
 
+# 打包产物（由工具脚本生成，不入库）
+dist/*.zip
+dist/*.bundle
+
 # 测试/演示临时数据
 .demo_data/
 .selftest_data/
+.ziptest/
 
 # Python
 __pycache__/
