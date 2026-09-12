@@ -20,12 +20,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -133,7 +138,14 @@ private fun DietCamApp(vm: DietViewModel) {
                 )
             } else {
                 Column(Modifier.fillMaxSize()) {
-                    Box(Modifier.weight(1f)) {
+                    // 顶部统一避让状态栏与刘海：日历 / 回忆 / 我的 三个页面自己不带内边距，
+                    // 曾经标题直接画到刘海底下被挡住。底部导航栏自己处理底部安全区，
+                    // 相机页走另一条分支（画面要铺满），不受这里影响。
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top)),
+                    ) {
                         when (tab) {
                             Tab.Home -> HomeScreen(
                                 vm = vm,
