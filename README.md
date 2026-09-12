@@ -55,6 +55,15 @@
 打开 APP 就是主页：当日摄入 / 每日目标的进度环、热量剩余、三大营养素进度条，
 下面是今天的逐条记录（带缩略图）。底部的绿色圆钮进入相机。
 
+### 四个页签
+
+| 页签 | 内容 |
+| --- | --- |
+| **主页** | 当日进度环、营养素进度条、今日记录（点任意一条可编辑/删除/让模型重分析） |
+| **日历** | 月历视图，有记录的日子带小圆点（绿=达标 / 黄=偏少 / 红=超标），下方本月概况 |
+| **回忆** | 最近 7/30/90 天的记录按日期串成时间线 |
+| **我的** | 身体档案（身高/体重/年龄/性别/活动量/目标）→ 自动推算每日目标，也可手动改目标 |
+
 ### 记录
 
 | 操作 | 结果 |
@@ -137,7 +146,7 @@ python tools/bump_version.py --show    # 查看当前版本
 
 不是"写完就交"，下面这些是实际跑出来的结果：
 
-**AstrBot 插件 — 156 项测试全部通过**
+**AstrBot 插件 — 222 项测试全部通过**
 
 ```bash
 python tools/run_all_checks.py      # 一键跑完下面全部检查
@@ -145,7 +154,7 @@ python tools/run_all_checks.py      # 一键跑完下面全部检查
 
 | 检查 | 说明 |
 | --- | --- |
-| `tools/plugin_selftest.py` | 156 项单元 + 端到端测试 |
+| `tools/plugin_selftest.py` | 222 项单元 + 端到端测试 |
 | `tools/verify_regression.py` | 验证测试本身有效（能区分修复前后） |
 | `tools/demo_plugin.py` | 端到端演示，兼作冒烟测试 |
 
@@ -172,6 +181,21 @@ python tools/demo_plugin.py
 会合成一张炒饭照片、走完"上传 → 落盘 → 分析 → 查询 → 取回"全流程，
 并打印 `/饮食` 指令的真实输出与磁盘文件结构，不需要任何模型服务。
 
+**已修复的真实问题（2.1.0）**
+
+上线后又踩到两个，都已修复并加了回归验证：
+
+* `too many values to unpack (expected 2)` —— 在 `astrbot_provider`（复用 AstrBot 提供商）模式下
+  点拍照必现。根因是流式分支里把 `_analyze()` 返回的 **dict** 当成元组解包
+  （`text, engine = await self._analyze(...)`），dict 键多于两个就抛错。
+* 相机页底栏跑到屏幕顶部并盖住返回按钮 —— `Crossfade` 的内容 lambda 不是 `BoxScope`，
+  在里面写 `Modifier.align()` 不生效。已改为在内容外包一层铺满的 `Box`。
+* 主页「今天」被刘海遮挡 —— `LazyColumn` 缺少 `statusBarsPadding()`。
+
+`tools/verify_regression.py` 会把这两个 bug 的旧写法分别还原到副本上跑一遍，
+确认测试确实能复现它们（复现结果：`400 缺少文件字段 file`、
+`too many values to unpack (expected 2)`）。
+
 **已修复的真实问题（1.0.3）**
 
 上线后点击拍照报 `缺少文件字段 file`。根因是 AstrBot 的 `PluginMultiDict`
@@ -191,17 +215,17 @@ BUILD SUCCESSFUL in 34s
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-2.0.0-release.apk`（12.30 MB） |
-| 包名 / 版本 | `com.dietcam.app` v2.0.0 (versionCode 4) |
+| 产物 | `dist/DietCam-2.1.0-release.apk`（12.38 MB） |
+| 包名 / 版本 | `com.dietcam.app` v2.1.0 (versionCode 5) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
 | 签名方案 | APK Signature Scheme v2 + v3 均已校验通过 |
 | 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（跨构建稳定） |
-| SHA-256 | `3BF04FF1E41C01C68B8A0D9D770C4E49C5954834128738CB4CA1CD834F76E03B` |
+| SHA-256 | `87C51A2534831187B19C957E07170EBEF8E3BBF614E341E0DE751465D2511337` |
 
-**升级路径实测** —— 2.0.0（主页 + 定格 + 流式）由 `bump_version.py` 递增后构建：
+**升级路径实测** —— 2.1.0 由 `bump_version.py` 递增后构建：
 
 | | 1.0.0 | 2.0.0 |
 | --- | --- | --- |

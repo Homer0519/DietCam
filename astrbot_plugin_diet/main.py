@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - 兼容旧版本
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
@@ -70,6 +70,56 @@ DEFAULT_TARGETS = {
     "carbs_g": 250.0,
     "fat_g": 65.0,
 }
+
+# 身体档案默认值（APP 里可改）
+DEFAULT_PROFILE = {
+    "height_cm": 170.0,
+    "weight_kg": 65.0,
+    "age": 30,
+    "sex": "male",          # male / female
+    "activity": "light",    # sedentary / light / moderate / active / very_active
+    "goal": "maintain",     # lose / maintain / gain
+}
+
+# 活动系数与目标系数
+ACTIVITY_FACTORS = {
+    "sedentary": 1.2,
+    "light": 1.375,
+    "moderate": 1.55,
+    "active": 1.725,
+    "very_active": 1.9,
+}
+GOAL_FACTORS = {"lose": 0.80, "maintain": 1.0, "gain": 1.15}
+
+
+def compute_targets(profile: dict) -> dict:
+    """按 Mifflin-St Jeor 公式从身高体重推算每日摄入目标。
+
+    BMR = 10*体重kg + 6.25*身高cm - 5*年龄 + (男 +5 / 女 -161)
+    再乘活动系数得到 TDEE，最后按目标（减脂/维持/增重）调整。
+    蛋白质至少 1.2g/kg 体重，脂肪占 25% 热量，其余给碳水。
+    """
+    height = _f(profile.get("height_cm"), 170.0)
+    weight = _f(profile.get("weight_kg"), 65.0)
+    age = _f(profile.get("age"), 30.0)
+    male = str(profile.get("sex") or "male") != "female"
+
+    bmr = 10.0 * weight + 6.25 * height - 5.0 * age + (5.0 if male else -161.0)
+    activity = ACTIVITY_FACTORS.get(str(profile.get("activity") or "light"), 1.375)
+    goal = GOAL_FACTORS.get(str(profile.get("goal") or "maintain"), 1.0)
+
+    kcal = max(800.0, bmr * activity * goal)
+    protein = max(1.2 * weight, kcal * 0.25 / 4.0)
+    fat = kcal * 0.25 / 9.0
+    carbs = max(0.0, (kcal - protein * 4.0 - fat * 9.0) / 4.0)
+
+    return {
+        "calories_kcal": round(kcal, 1),
+        "protein_g": round(protein, 1),
+        "carbs_g": round(carbs, 1),
+        "fat_g": round(fat, 1),
+    }
+
 
 # SSE 每条事件的前缀
 SSE_PREFIX = "data: "
@@ -186,7 +236,29 @@ class DietPlugin(Star):
                 "analyze a typed description, streamed as SSE",
             ),
             (prefix + "/summary", self.api_summary, ["GET"], "today's intake and daily targets"),
-            (prefix + "/targets", self.api_targets, ["POST"], "update daily targets"),
+            (prefix + "/targets", self.api_targets, ["POST"], "update daily targets (manual)"),
+            (prefix + "/profile", self.api_profile, ["GET"], "read body profile and suggested targets"),
+            (prefix + "/profile", self.api_profile_save, ["POST"], "save body profile, recompute targets"),
+            (
+                prefix + "/record/update",
+                self.api_record_update,
+                ["POST"],
+                "edit one record manually",
+            ),
+            (
+                prefix + "/record/delete",
+                self.api_record_delete,
+                ["POST"],
+                "delete one record and its photo",
+            ),
+            (
+                prefix + "/record/reanalyze",
+                self.api_record_reanalyze,
+                ["POST"],
+                "re-analyze one record with the model",
+            ),
+            (prefix + "/calendar", self.api_calendar, ["GET"], "per-day totals for a month"),
+            (prefix + "/history", self.api_history, ["GET"], "recent records timeline"),
             (prefix + "/archive", self.api_archive, ["POST"], "archive a photo (base64)"),
             (prefix + "/records", self.api_records, ["GET"], "list one day records"),
             (prefix + "/photo", self.api_photo, ["GET"], "fetch an archived photo"),
@@ -324,8 +396,38 @@ class DietPlugin(Star):
         except OSError as exc:
             logger.warning("[diet] 写入 state.json 失败: %s", exc)
 
-    def _targets(self) -> dict:
-        """每日目标：插件配置为底，APP 写入 state.json 的覆盖值优先。"""
+    def _profile(self) -> dict:
+        """身体档案：默认值 + 插件配置 + state.json 里的覆盖。"""
+        profile = dict(DEFAULT_PROFILE)
+        for key in DEFAULT_PROFILE:
+            raw = self.config.get("profile_" + key)
+            if raw in (None, ""):
+                continue
+            profile[key] = raw
+        saved = self._load_state().get("profile")
+        if isinstance(saved, dict):
+            for key in DEFAULT_PROFILE:
+                if saved.get(key) not in (None, ""):
+                    profile[key] = saved[key]
+        # 数值字段统一转 float/int，避免 JSON 里存成字符串
+        profile["height_cm"] = _f(profile.get("height_cm"), 170.0)
+        profile["weight_kg"] = _f(profile.get("weight_kg"), 65.0)
+        try:
+            profile["age"] = int(float(profile.get("age") or 30))
+        except (TypeError, ValueError):
+            profile["age"] = 30
+        for key in ("sex", "activity", "goal"):
+            value = str(profile.get(key) or DEFAULT_PROFILE[key])
+            allowed = {
+                "sex": ("male", "female"),
+                "activity": tuple(ACTIVITY_FACTORS),
+                "goal": tuple(GOAL_FACTORS),
+            }[key]
+            profile[key] = value if value in allowed else DEFAULT_PROFILE[key]
+        return profile
+
+    def _config_targets(self) -> dict:
+        """插件配置里写的目标，没写的用默认值。"""
         targets = dict(DEFAULT_TARGETS)
         for key in DEFAULT_TARGETS:
             raw = self.config.get("target_" + key)
@@ -335,15 +437,69 @@ class DietPlugin(Star):
                 targets[key] = float(raw)
             except (TypeError, ValueError):
                 continue
-        override = self._load_state().get("targets")
-        if isinstance(override, dict):
-            for key in DEFAULT_TARGETS:
-                try:
-                    if override.get(key) not in (None, ""):
-                        targets[key] = float(override[key])
-                except (TypeError, ValueError):
-                    continue
-        return {k: round(v, 1) for k, v in targets.items()}
+        return targets
+
+    def _targets(self) -> dict:
+        """每日目标，优先级：手动设定 > 按档案推算 > 插件配置 > 默认值。
+
+        手动模式只覆盖用户显式改过的键，其余仍然沿用插件配置里的基线，
+        这样在 WebUI 里配过的值不会因为 APP 改了一项就丢掉。
+        """
+        state = self._load_state()
+        mode = str(state.get("targets_mode") or "")
+
+        if mode == "manual":
+            targets = self._config_targets()
+            manual = state.get("targets")
+            if isinstance(manual, dict):
+                for key in DEFAULT_TARGETS:
+                    try:
+                        if manual.get(key) not in (None, ""):
+                            targets[key] = float(manual[key])
+                    except (TypeError, ValueError):
+                        continue
+            return {k: round(v, 1) for k, v in targets.items()}
+
+        if mode == "auto" and state.get("profile"):
+            return compute_targets(self._profile())
+
+        return {k: round(v, 1) for k, v in self._config_targets().items()}
+
+    def _targets_mode(self) -> str:
+        return str(self._load_state().get("targets_mode") or "config")
+
+    # ------------------------------------------------------- 记录增删改查
+
+    def _rewrite_records(self, day: str, records: list[dict]) -> None:
+        """整文件重写当天记录（编辑、删除后用）。"""
+        path = self._record_file(day)
+        try:
+            if records:
+                with path.open("w", encoding="utf-8") as fh:
+                    for item in records:
+                        fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+            elif path.exists():
+                path.unlink()
+        except OSError as exc:
+            logger.error("[diet] 重写记录失败 %s: %s", path, exc)
+
+    def _find_record(self, day: str, record_id: str) -> tuple[list[dict], int]:
+        records = self._load_records(day)
+        for index, item in enumerate(records):
+            if str(item.get("id")) == record_id:
+                return records, index
+        return records, -1
+
+    def _delete_photo(self, day: str, name: str) -> None:
+        """删除归档照片；同名文件不存在就直接忽略。"""
+        if not name:
+            return
+        path = self._safe_photo(day, name)
+        if path is not None and path.is_file():
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning("[diet] 删除照片失败 %s: %s", path, exc)
 
     @staticmethod
     def _sse(payload: dict) -> str:
@@ -503,9 +659,17 @@ class DietPlugin(Star):
             prompt = prompt + "\n\n用户的补充说明：" + note
 
         if mode != "openai_compatible":
-            text, engine = await self._analyze(path, note)
-            yield ("meta", engine)
-            yield ("delta", json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else str(text))
+            # 注意：_analyze() 返回的是 dict，不能当元组解包
+            # （曾经写成 text, engine = await self._analyze(...)，
+            #  在 astrbot_provider 模式下会抛 "too many values to unpack"）
+            result = await self._analyze(path, note)
+            yield ("meta", str(result.get("_engine") or mode))
+            clean = {
+                key: value
+                for key, value in result.items()
+                if not str(key).startswith("_")
+            }
+            yield ("delta", json.dumps(clean, ensure_ascii=False))
             return
 
         base, payload, headers, timeout_s, model = self._openai_request(path, prompt, stream=True)
@@ -625,6 +789,12 @@ class DietPlugin(Star):
                     "stream": bool(WEB_API and stream_response is not None),
                     "summary": True,
                     "targets": True,
+                    "profile": True,
+                    "record_edit": True,
+                    "record_delete": True,
+                    "record_reanalyze": True,
+                    "calendar": True,
+                    "history": True,
                     "text": True,
                     "archive": True,
                 },
@@ -801,6 +971,285 @@ class DietPlugin(Star):
             self._stream_analyze(None, text, day, "", "app-text", moment)
         )
 
+    async def api_profile(self):
+        """读取身体档案与推算出来的目标。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        profile = self._profile()
+        # 目标为空时也返回一份推算值，方便 APP 直接展示"若按此档案应摄入多少"
+        return json_response(
+            {
+                "ok": True,
+                "profile": profile,
+                "suggested": compute_targets(profile),
+                "targets": self._targets(),
+                "targets_mode": self._targets_mode(),
+            }
+        )
+
+    async def api_profile_save(self):
+        """保存身体档案，并按公式重算每日目标。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+
+        profile = self._profile()
+        ranges = {
+            "height_cm": (80.0, 250.0),
+            "weight_kg": (20.0, 400.0),
+            "age": (5.0, 120.0),
+        }
+        for key, (low, high) in ranges.items():
+            raw = _pick(payload, key, None)
+            if raw is None or raw == "":
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return error_response("%s 必须是数字" % key)
+            if not (low <= value <= high):
+                return error_response("%s 应在 %g 到 %g 之间" % (key, low, high))
+            profile[key] = value
+        try:
+            profile["age"] = int(float(profile.get("age") or 30))
+        except (TypeError, ValueError):
+            profile["age"] = 30
+
+        for key, allowed in (
+            ("sex", ("male", "female")),
+            ("activity", tuple(ACTIVITY_FACTORS)),
+            ("goal", tuple(GOAL_FACTORS)),
+        ):
+            raw = _pick(payload, key, None)
+            if raw in (None, ""):
+                continue
+            if str(raw) not in allowed:
+                return error_response("%s 取值不合法" % key)
+            profile[key] = str(raw)
+
+        state = self._load_state()
+        state["profile"] = profile
+        state["targets_mode"] = "auto"
+        # 清掉之前的手动目标，让新档案生效
+        state.pop("targets", None)
+        self._save_state(state)
+
+        return json_response(
+            {
+                "ok": True,
+                "profile": self._profile(),
+                "targets": self._targets(),
+                "targets_mode": "auto",
+            }
+        )
+
+    async def api_record_update(self):
+        """手动修改一条记录（覆盖式：传了哪个字段就改哪个）。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+        day = str(_pick(payload, "date", "") or "")
+        record_id = str(_pick(payload, "id", "") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return error_response("date 格式应为 YYYY-MM-DD")
+        if not record_id:
+            return error_response("缺少 id")
+
+        records, index = self._find_record(day, record_id)
+        if index < 0:
+            return error_response("没有找到这条记录")
+        record = dict(records[index])
+
+        for key in ("title", "meal", "advice", "note"):
+            value = _pick(payload, key, None)
+            if value is not None:
+                record[key] = str(value)[:300]
+        for key in ("calories_kcal", "protein_g", "carbs_g", "fat_g"):
+            value = _pick(payload, key, None)
+            if value is None or value == "":
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return error_response("%s 必须是数字" % key)
+            if not (0 <= number <= 100000):
+                return error_response("%s 超出合理范围" % key)
+            record[key] = round(number, 1)
+        if _pick(payload, "is_food", None) is not None:
+            record["is_food"] = bool(_pick(payload, "is_food"))
+        if _pick(payload, "items", None) is not None:
+            items = _pick(payload, "items")
+            if isinstance(items, list):
+                record["items"] = items
+
+        record["source"] = str(record.get("source") or "app")
+        record["edited"] = True
+        record["edited_at"] = int(time.time())
+        records[index] = record
+        self._rewrite_records(day, records)
+        logger.info("[diet] 已修改记录 %s/%s", day, record_id)
+        return json_response({"ok": True, "record": record})
+
+    async def api_record_delete(self):
+        """删除一条记录，连归档照片一起删掉。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+        day = str(_pick(payload, "date", "") or "")
+        record_id = str(_pick(payload, "id", "") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return error_response("date 格式应为 YYYY-MM-DD")
+        if not record_id:
+            return error_response("缺少 id")
+
+        records, index = self._find_record(day, record_id)
+        if index < 0:
+            return error_response("没有找到这条记录")
+        removed = records.pop(index)
+        self._rewrite_records(day, records)
+
+        # 同一张照片没有被别的记录引用时才删文件
+        photo = str(removed.get("photo") or "")
+        if photo and not any(str(r.get("photo") or "") == photo for r in records):
+            self._delete_photo(day, photo)
+
+        logger.info("[diet] 已删除记录 %s/%s", day, record_id)
+        return json_response({"ok": True, "removed": removed, "left": len(records)})
+
+    async def api_record_reanalyze(self):
+        """让模型按新的说明重新分析这条记录（有照片用照片，没有就用原文）。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+        day = str(_pick(payload, "date", "") or "")
+        record_id = str(_pick(payload, "id", "") or "")
+        instruction = str(_pick(payload, "instruction", "") or "").strip()[:300]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return error_response("date 格式应为 YYYY-MM-DD")
+        if not record_id:
+            return error_response("缺少 id")
+
+        records, index = self._find_record(day, record_id)
+        if index < 0:
+            return error_response("没有找到这条记录")
+        old = records[index]
+
+        photo_name = str(old.get("photo") or "")
+        note = " ".join(
+            part for part in [str(old.get("note") or ""), instruction] if part
+        ).strip()
+        if not note:
+            note = "请重新估算这一餐，给出更准确的结果。"
+
+        if photo_name:
+            path = self._safe_photo(day, photo_name)
+            target = path if (path is not None and path.is_file()) else None
+        else:
+            target = None
+        if target is None and not photo_name:
+            # 纯文字记录：把原始描述作为输入重新分析
+            result = await self._analyze(None, note=str(old.get("note") or note))
+        else:
+            if target is None:
+                return error_response("归档照片已不存在，无法重新分析")
+            result = await self._analyze(target, note=note)
+
+        items = result.get("items")
+        updated = dict(old)
+        updated.update(
+            {
+                "title": str(result.get("title") or old.get("title") or "一餐")[:80],
+                "meal": str(result.get("meal") or old.get("meal") or "")[:16],
+                "calories_kcal": _f(result.get("calories_kcal")),
+                "protein_g": _f(result.get("protein_g")),
+                "carbs_g": _f(result.get("carbs_g")),
+                "fat_g": _f(result.get("fat_g")),
+                "confidence": _f(result.get("confidence")),
+                "items": items if isinstance(items, list) else old.get("items") or [],
+                "advice": str(result.get("advice") or "")[:300],
+                "engine": str(result.get("_engine") or ""),
+                "is_food": bool(result.get("is_food", True)),
+                "reanalyzed": True,
+                "reanalyzed_at": int(time.time()),
+            }
+        )
+        records[index] = updated
+        self._rewrite_records(day, records)
+        logger.info("[diet] 已重新分析记录 %s/%s", day, record_id)
+        return json_response({"ok": True, "record": updated})
+
+    async def api_calendar(self):
+        """某个月每天的摄入合计，供日历页展示。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        month = str(_pick(request.query, "month", "") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}", month):
+            return error_response("month 格式应为 YYYY-MM")
+
+        days: dict[str, dict] = {}
+        prefix = month + "-"
+        for path in sorted(self.record_dir.glob(prefix + "*.jsonl")):
+            day = path.stem
+            records = self._load_records(day)
+            if not records:
+                continue
+            totals = self._totals(records)
+            days[day] = {
+                "calories_kcal": totals["calories_kcal"],
+                "protein_g": totals["protein_g"],
+                "carbs_g": totals["carbs_g"],
+                "fat_g": totals["fat_g"],
+                "count": len(records),
+            }
+        return json_response({"ok": True, "month": month, "targets": self._targets(), "days": days})
+
+    async def api_history(self):
+        """最近若干天的逐条记录，供回忆页做时间线。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        try:
+            days = int(_pick(request.query, "days", 30, type=int) or 30)
+        except (TypeError, ValueError):
+            days = 30
+        days = max(1, min(days, 365))
+        end = str(_pick(request.query, "end", "") or self._today())
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
+            return error_response("end 格式应为 YYYY-MM-DD")
+        try:
+            end_date = dt.date.fromisoformat(end)
+        except ValueError:
+            return error_response("end 不是合法日期")
+
+        out: list[dict] = []
+        per_day: dict[str, dict] = {}
+        for offset in range(days):
+            day = (end_date - dt.timedelta(days=offset)).isoformat()
+            records = self._load_records(day)
+            if not records:
+                continue
+            per_day[day] = self._totals(records)
+            out.extend(records)
+        out.sort(key=lambda r: (str(r.get("date") or ""), str(r.get("time") or "")), reverse=True)
+        return json_response(
+            {
+                "ok": True,
+                "end": end,
+                "days": days,
+                "count": len(out),
+                "targets": self._targets(),
+                "per_day": per_day,
+                "records": out,
+            }
+        )
+
     async def api_summary(self):
         """主页用：当天摄入合计、每日目标与记录明细。"""
         if not self._authorized():
@@ -845,8 +1294,17 @@ class DietPlugin(Star):
         if not updated:
             return error_response("没有可更新的目标字段")
         state["targets"] = current
+        # 手动改过之后，就不再被档案重算覆盖
+        state["targets_mode"] = "manual"
         self._save_state(state)
-        return json_response({"ok": True, "updated": updated, "targets": self._targets()})
+        return json_response(
+            {
+                "ok": True,
+                "updated": updated,
+                "targets": self._targets(),
+                "targets_mode": "manual",
+            }
+        )
 
     async def api_archive(self):
         if not self._authorized():

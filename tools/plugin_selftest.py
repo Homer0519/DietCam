@@ -71,9 +71,13 @@ def make_request(**kw) -> stub.PluginRequest:
     return req
 
 
-def call(suffix: str):
-    """像 AstrBot 那样，从注册的路由取到 handler 并调用。"""
-    return asyncio.run(context.handler_for(suffix)())
+def call(suffix: str, method: str | None = None):
+    """像 AstrBot 那样，从注册的路由取到 handler 并调用。
+
+    同一个路径可能有 GET 与 POST 两个 handler（例如 /profile），
+    这时用 method 指定。
+    """
+    return asyncio.run(context.handler_for(suffix, method)())
 
 
 def upload(name: str = "meal.jpg", data: bytes = b"\xff\xd8\xff\xe0fake-jpeg-bytes"):
@@ -233,7 +237,7 @@ plugin.config.pop("extra_headers", None)
 
 # ================================================================ 9. 端到端：文件上传（回归）
 section("9. 端到端 · 照片上传（线上 bug 的回归测试）")
-check("路由已注册", len(context.routes()) == 10, context.routes())
+check("路由已注册", len(context.routes()) == 17, context.routes())
 patch_analyzer()
 DAY = dt.datetime.now(plugin.tz).strftime("%Y-%m-%d")
 resp = call("/health")
@@ -521,6 +525,55 @@ resp = asyncio.run(context.handler_for("/analyze_text_stream")())
 check("文字流式需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
 
 check("stream_response 在桩里可用", stub.stream_response is not None)
+# 回归：astrbot_provider 模式下走【真实的】_stream_model（不能再被整段替换掉）
+del plugin._stream_model  # 撤销前面 patch_stream 注入的实例属性，回到真实实现
+plugin.config["llm_mode"] = "astrbot_provider"
+
+
+async def fake_analyze_dict(path_=None, note="", *args, **kwargs):
+    """真实 _analyze 的返回类型就是 dict。"""
+    return {
+        "is_food": True, "title": "烤箱鸡翅", "meal": "加餐",
+        "calories_kcal": 430, "protein_g": 28, "carbs_g": 5, "fat_g": 33,
+        "items": [{"name": "鸡翅", "portion": "6 只", "calories_kcal": 430}],
+        "advice": "油脂偏高，去皮更好。",
+        "_engine": "astrbot:test-provider",
+    }
+
+
+plugin._analyze = fake_analyze_dict
+
+# 直接驱动真实的 _stream_model，验证它会产出合法的 (kind, value) 二元组
+gen = plugin._stream_model(None, "烤了六只鸡翅")
+pairs = []
+async def drain():
+    async for item in gen:
+        pairs.append(item)
+asyncio.run(drain())
+check("provider 模式 _stream_model 不抛异常", True)
+check("provider 模式产出二元组", all(isinstance(p, tuple) and len(p) == 2 for p in pairs), pairs)
+check("provider 模式先给 meta", pairs and pairs[0][0] == "meta", pairs)
+check("provider 模式随后给 delta", len(pairs) >= 2 and pairs[1][0] == "delta", pairs)
+check("meta 里带上了引擎信息", "test-provider" in str(pairs[0][1]), pairs[0])
+
+provider_payload = json.loads(pairs[1][1])
+check("delta 是能被解析的 JSON", provider_payload.get("title") == "烤箱鸡翅", provider_payload)
+check("内部下划线字段不暴露给客户端", all(not k.startswith("_") for k in provider_payload), list(provider_payload))
+
+# 端到端：provider 模式下的 /analyze_stream 必须能跑通
+events = events_of("/analyze_stream", files={"file": upload("wings.jpg")})
+ekinds = [e.get("type") for e in events]
+check("provider 模式流式端到端不报错", "error" not in ekinds, events)
+check("provider 模式流式以 done 结束", ekinds and ekinds[-1] == "done", ekinds)
+pdone = [e for e in events if e.get("type") == "done"][0]["record"]
+check("provider 模式解析出正确标题", pdone.get("title") == "烤箱鸡翅", pdone)
+check("provider 模式热量解析正确", pdone.get("calories_kcal") == 430.0, pdone)
+
+plugin.config["llm_mode"] = "openai_compatible"
+del plugin._analyze           # 还原真实实现，避免影响后续用例
+del plugin._analyze_openai    # 还原，后续用例会各自再 patch
+patch_stream()                # 恢复给后续测试使用
+
 check("桩能识别流式响应类型", isinstance(stub.FakeStreamResponse((x for x in [])), stub.FakeResponse))
 
 # ================================================================ 18. 提示词格式
@@ -531,6 +584,184 @@ check("文字提示词同样要求两行", "第一行" in module.TEXT_PROMPT and
 check("两行输出仍能被解析", module.DietPlugin._parse_json("看到一碗面。\n" + '{"title":"牛肉面","calories_kcal":600}').get("title") == "牛肉面")
 check("带前后缀的两行输出也能解析", module.DietPlugin._parse_json("观察：有米饭\n" + '{"title":"炒饭"}' + "\n完毕").get("title") == "炒饭")
 
+
+# ================================================================ 19. 身体档案与目标
+section("19. 端到端 · 身体档案 /profile 与目标推算")
+
+plugin.config.pop("profile_height_cm", None)
+state0 = plugin._load_state()
+state0.pop("profile", None)
+state0.pop("targets", None)
+state0.pop("targets_mode", None)
+plugin._save_state(state0)
+
+make_request()
+resp = call("/profile", "GET")
+check("/profile 返回 200", resp.status_code == 200, resp.payload)
+check("返回默认档案", resp.payload["profile"]["height_cm"] == 170.0, resp.payload["profile"])
+check("返回建议目标", set(resp.payload["suggested"]) == set(module.DEFAULT_TARGETS))
+
+# 公式自检：男 175cm / 70kg / 30 岁 / 轻度活动 / 维持
+calc = module.compute_targets({"height_cm": 175, "weight_kg": 70, "age": 30,
+                              "sex": "male", "activity": "light", "goal": "maintain"})
+bmr = 10 * 70 + 6.25 * 175 - 5 * 30 + 5
+expected_kcal = bmr * 1.375
+check("热量按 Mifflin-St Jeor 推算", abs(calc["calories_kcal"] - expected_kcal) < 1.0,
+      (calc["calories_kcal"], expected_kcal))
+check("蛋白质不低于 1.2g/kg", calc["protein_g"] >= 70 * 1.2 - 0.1, calc)
+check("碳水不为负", calc["carbs_g"] >= 0, calc)
+
+female = module.compute_targets({"height_cm": 160, "weight_kg": 55, "age": 28,
+                                "sex": "female", "activity": "sedentary", "goal": "lose"})
+male_same = module.compute_targets({"height_cm": 160, "weight_kg": 55, "age": 28,
+                                   "sex": "male", "activity": "sedentary", "goal": "lose"})
+check("女性目标低于男性（公式减 161）", female["calories_kcal"] < male_same["calories_kcal"])
+check("减脂目标低于维持",
+      module.compute_targets({"height_cm": 175, "weight_kg": 70, "age": 30, "sex": "male",
+                             "activity": "light", "goal": "lose"})["calories_kcal"]
+      < calc["calories_kcal"])
+
+make_request(payload={"height_cm": 180, "weight_kg": 80, "age": 25,
+                      "sex": "male", "activity": "moderate", "goal": "lose"})
+resp = call("/profile", "POST")
+check("保存档案返回 200", resp.status_code == 200, resp.payload)
+check("档案已保存", resp.payload["profile"]["height_cm"] == 180.0, resp.payload["profile"])
+check("保存后模式为 auto", resp.payload["targets_mode"] == "auto")
+t = resp.payload["targets"]
+sug = module.compute_targets(resp.payload["profile"])
+check("目标等于按新档案推算的值", abs(t["calories_kcal"] - sug["calories_kcal"]) < 0.2, (t, sug))
+
+make_request(payload={"height_cm": 10})
+resp = call("/profile", "POST")
+check("身高越界被拒绝", resp.status_code == 400 and "之间" in resp.payload["message"], resp.payload)
+
+make_request(payload={"sex": "other"})
+resp = call("/profile", "POST")
+check("非法性别被拒绝", resp.status_code == 400, resp.payload)
+
+make_request(payload={"weight_kg": "很重"})
+resp = call("/profile", "POST")
+check("非法体重被拒绝", resp.status_code == 400, resp.payload)
+
+# 手动目标应覆盖自动推算，且改档案后回到自动
+make_request(payload={"calories_kcal": 1234})
+call("/targets")
+check("手动设目标后模式为 manual", plugin._targets_mode() == "manual")
+check("手动目标生效", plugin._targets()["calories_kcal"] == 1234.0, plugin._targets())
+make_request(payload={"height_cm": 181})
+call("/profile", "POST")
+check("改档案后恢复自动模式", plugin._targets_mode() == "auto")
+check("改档案后目标被重算", plugin._targets()["calories_kcal"] != 1234.0, plugin._targets())
+
+stub.set_request(module, stub.PluginRequest(headers={}))
+resp = asyncio.run(context.handler_for("/profile", "GET")())
+check("/profile 需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
+
+# ================================================================ 20. 记录编辑与删除
+section("20. 端到端 · 记录编辑 / 删除 / AI 重分析")
+
+patch_analyzer()
+make_request(files={"file": upload("editable.jpg")})
+resp = call("/analyze")
+edit_rec = resp.payload["record"]
+edit_day = edit_rec["date"]
+edit_id = edit_rec["id"]
+check("准备了一条可编辑记录", bool(edit_id))
+
+make_request(payload={"date": edit_day, "id": edit_id, "title": "改过的名字",
+                      "calories_kcal": 555, "meal": "宵夜"})
+resp = call("/record/update")
+check("修改记录返回 200", resp.status_code == 200, resp.payload)
+check("标题已改", resp.payload["record"]["title"] == "改过的名字")
+check("热量已改", resp.payload["record"]["calories_kcal"] == 555.0)
+check("餐次已改", resp.payload["record"]["meal"] == "宵夜")
+check("标记为已编辑", resp.payload["record"].get("edited") is True)
+
+reread = [r for r in plugin._load_records(edit_day) if r["id"] == edit_id][0]
+check("改动已落盘", reread["title"] == "改过的名字" and reread["calories_kcal"] == 555.0, reread)
+
+make_request(payload={"date": edit_day, "id": edit_id, "calories_kcal": "很多"})
+resp = call("/record/update")
+check("非法数值被拒绝", resp.status_code == 400, resp.payload)
+
+make_request(payload={"date": edit_day, "id": "不存在的id", "title": "x"})
+resp = call("/record/update")
+check("改不存在的记录被拒绝", resp.status_code == 400 and "没有找到" in resp.payload["message"])
+
+# AI 重分析
+plugin._analyze_openai = None
+patch_stream()
+async def fake_reanalyze(path, prompt):
+    return json.dumps({"is_food": True, "title": "重新分析后的标题", "meal": "午餐",
+                       "calories_kcal": 888, "protein_g": 40, "carbs_g": 90, "fat_g": 30,
+                       "items": [], "advice": "重新给出的建议"}), "stub"
+plugin._analyze_openai = fake_reanalyze
+make_request(payload={"date": edit_day, "id": edit_id, "instruction": "这是两人份，请翻倍"})
+resp = call("/record/reanalyze")
+check("重新分析返回 200", resp.status_code == 200, resp.payload)
+check("标题被模型更新", resp.payload["record"]["title"] == "重新分析后的标题", resp.payload["record"])
+check("热量被模型更新", resp.payload["record"]["calories_kcal"] == 888.0)
+check("标记为已重分析", resp.payload["record"].get("reanalyzed") is True)
+check("重分析保留了原来的照片", resp.payload["record"]["photo"] == edit_rec["photo"])
+check("重分析保留了原始记录 id", resp.payload["record"]["id"] == edit_id)
+
+# 删除
+photo_path = plugin.photo_dir / edit_day / edit_rec["photo"]
+check("删除前照片存在", photo_path.is_file())
+make_request(payload={"date": edit_day, "id": edit_id})
+resp = call("/record/delete")
+check("删除记录返回 200", resp.status_code == 200, resp.payload)
+check("返回被删掉的记录", resp.payload["removed"]["id"] == edit_id)
+check("记录确实没了", all(r["id"] != edit_id for r in plugin._load_records(edit_day)))
+check("归档照片一并删除", not photo_path.exists())
+
+make_request(payload={"date": edit_day, "id": edit_id})
+resp = call("/record/delete")
+check("重复删除返回错误", resp.status_code == 400, resp.payload)
+
+stub.set_request(module, stub.PluginRequest(headers={}, payload={"date": edit_day, "id": "x"}))
+resp = asyncio.run(context.handler_for("/record/delete", "POST")())
+check("删除接口需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
+
+# ================================================================ 21. 日历与历史
+section("21. 端到端 · 日历 /calendar 与历史 /history")
+
+month = edit_day[:7]
+make_request(query={"month": month})
+resp = call("/calendar")
+check("日历返回 200", resp.status_code == 200, resp.payload)
+check("返回 days 字典", isinstance(resp.payload.get("days"), dict))
+check("包含有记录的日期", edit_day in resp.payload["days"], list(resp.payload["days"])[:5])
+day_data = resp.payload["days"].get(edit_day, {})
+check("每天含热量与条数", "calories_kcal" in day_data and "count" in day_data, day_data)
+check("日历附带目标", "targets" in resp.payload)
+
+make_request(query={"month": "不是月份"})
+resp = call("/calendar")
+check("非法月份被拒绝", resp.status_code == 400 and "YYYY-MM" in resp.payload["message"])
+
+make_request(query={"days": 30})
+resp = call("/history")
+check("历史返回 200", resp.status_code == 200, resp.payload)
+check("返回记录列表", isinstance(resp.payload.get("records"), list))
+check("返回 per_day 汇总", isinstance(resp.payload.get("per_day"), dict))
+check("记录按时间倒序", all(
+    (resp.payload["records"][i]["date"], resp.payload["records"][i]["time"])
+    >= (resp.payload["records"][i + 1]["date"], resp.payload["records"][i + 1]["time"])
+    for i in range(len(resp.payload["records"]) - 1)
+))
+
+make_request(query={"days": 99999})
+resp = call("/history")
+check("过大的 days 被夹到上限", resp.status_code == 200 and resp.payload["days"] <= 365, resp.payload.get("days"))
+
+make_request(query={"days": 7, "end": "坏日期"})
+resp = call("/history")
+check("非法 end 被拒绝", resp.status_code == 400, resp.payload)
+
+stub.set_request(module, stub.PluginRequest(headers={}, query={"month": month}))
+resp = asyncio.run(context.handler_for("/calendar")())
+check("日历接口需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
 # ================================================================ 结果
 print()
 print("=" * 56)

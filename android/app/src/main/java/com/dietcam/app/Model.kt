@@ -113,3 +113,93 @@ object JsonParse {
         )
     }
 }
+
+/** 身体档案。 */
+data class BodyProfile(
+    val heightCm: Double = 170.0,
+    val weightKg: Double = 65.0,
+    val age: Int = 30,
+    val sex: String = "male",
+    val activity: String = "light",
+    val goal: String = "maintain",
+) {
+    val sexLabel: String get() = if (sex == "female") "女" else "男"
+}
+
+/** /profile 的完整返回。 */
+data class ProfileInfo(
+    val profile: BodyProfile,
+    val suggested: Nutrition,
+    val targets: Nutrition,
+    val mode: String,
+)
+
+/** 日历里某一天的合计。 */
+data class DayTotals(
+    val date: String,
+    val nutrition: Nutrition,
+    val count: Int,
+)
+
+data class CalendarMonth(
+    val month: String,
+    val targets: Nutrition,
+    val days: Map<String, DayTotals>,
+)
+
+object ProfileParse {
+    fun profile(obj: JSONObject?): BodyProfile {
+        if (obj == null) return BodyProfile()
+        return BodyProfile(
+            heightCm = obj.optDouble("height_cm", 170.0),
+            weightKg = obj.optDouble("weight_kg", 65.0),
+            age = obj.optInt("age", 30),
+            sex = obj.optString("sex", "male"),
+            activity = obj.optString("activity", "light"),
+            goal = obj.optString("goal", "maintain"),
+        )
+    }
+
+    fun info(obj: JSONObject) = ProfileInfo(
+        profile = profile(obj.optJSONObject("profile")),
+        suggested = Nutrition.from(obj.optJSONObject("suggested")),
+        targets = Nutrition.from(obj.optJSONObject("targets")),
+        mode = obj.optString("targets_mode", "config"),
+    )
+
+    fun calendar(obj: JSONObject): CalendarMonth {
+        val days = mutableMapOf<String, DayTotals>()
+        obj.optJSONObject("days")?.let { root ->
+            for (key in root.keys()) {
+                val item = root.optJSONObject(key) ?: continue
+                days[key] = DayTotals(
+                    date = key,
+                    nutrition = Nutrition.from(item),
+                    count = item.optInt("count", 0),
+                )
+            }
+        }
+        return CalendarMonth(
+            month = obj.optString("month", ""),
+            targets = Nutrition.from(obj.optJSONObject("targets")),
+            days = days,
+        )
+    }
+}
+
+object ActivityLabels {
+    val activity = linkedMapOf(
+        "sedentary" to "久坐（几乎不运动）",
+        "light" to "轻度（每周 1-3 次）",
+        "moderate" to "中度（每周 3-5 次）",
+        "active" to "高度（每周 6-7 次）",
+        "very_active" to "极高（体力工作/一天两练）",
+    )
+    val goal = linkedMapOf(
+        "lose" to "减脂",
+        "maintain" to "维持",
+        "gain" to "增重",
+    )
+    fun activityLabel(key: String) = activity[key] ?: key
+    fun goalLabel(key: String) = goal[key] ?: key
+}

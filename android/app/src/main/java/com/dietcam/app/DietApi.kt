@@ -238,6 +238,48 @@ class DietApi(private val settings: DietSettings) {
         }
     }
 
+    // ------------------------------------------------- 档案 / 日历 / 历史
+
+    suspend fun profile(): JSONObject = withContext(Dispatchers.IO) {
+        executeSync(newRequest(endpoint("/profile")).get().build())
+    }
+
+    suspend fun saveProfile(fields: Map<String, Any>): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+        fields.forEach { (k, v) -> body.put(k, v) }
+        executeSync(newRequest(endpoint("/profile")).post(jsonBody(body)).build())
+    }
+
+    suspend fun calendar(month: String): JSONObject = withContext(Dispatchers.IO) {
+        executeSync(newRequest(endpoint("/calendar") + "?month=" + month).get().build())
+    }
+
+    suspend fun history(days: Int, end: String? = null): JSONObject = withContext(Dispatchers.IO) {
+        val url = endpoint("/history") + "?days=" + days +
+            if (end.isNullOrBlank()) "" else "&end=" + end
+        executeSync(newRequest(url).get().build())
+    }
+
+    // ------------------------------------------------------ 单条记录操作
+
+    suspend fun updateRecord(date: String, id: String, fields: Map<String, Any>): JSONObject =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject().put("date", date).put("id", id)
+            fields.forEach { (k, v) -> body.put(k, v) }
+            executeSync(newRequest(endpoint("/record/update")).post(jsonBody(body)).build())
+        }
+
+    suspend fun deleteRecord(date: String, id: String): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("date", date).put("id", id)
+        executeSync(newRequest(endpoint("/record/delete")).post(jsonBody(body)).build())
+    }
+
+    suspend fun reanalyzeRecord(date: String, id: String, instruction: String): JSONObject =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject().put("date", date).put("id", id).put("instruction", instruction)
+            executeSync(newRequest(endpoint("/record/reanalyze")).post(jsonBody(body)).build())
+        }
+
     companion object {
         /** 内部标记：服务端不支持流式，调用方应回退到一次性接口。 */
         const val NO_STREAM = "__NO_STREAM__"

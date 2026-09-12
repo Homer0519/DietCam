@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,6 +33,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -51,10 +56,14 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
+    var actionTarget by remember { mutableStateOf<MealRecord?>(null) }
+    var editing by remember { mutableStateOf<MealRecord?>(null) }
+    var reanalyzing by remember { mutableStateOf<MealRecord?>(null) }
+    var deleting by remember { mutableStateOf<MealRecord?>(null) }
 
     Box(Modifier.fillMaxSize().background(Palette.Background)) {
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().statusBarsPadding(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 120.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -73,7 +82,7 @@ fun HomeScreen(
                         item { EmptyRecords(onOpenCamera) }
                     } else {
                         items(summary.records, key = { it.id.ifBlank { it.time + it.title } }) { record ->
-                            RecordRow(record, vm, summary.date)
+                            RecordRow(record, vm, summary.date) { actionTarget = record }
                         }
                     }
                 }
@@ -81,8 +90,47 @@ fun HomeScreen(
         }
 
         CameraFab(
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 28.dp),
             onClick = onOpenCamera,
+        )
+    }
+
+    actionTarget?.let { record ->
+        RecordActionSheet(
+            record = record,
+            onDismiss = { actionTarget = null },
+            onEdit = { editing = record; actionTarget = null },
+            onReanalyze = { reanalyzing = record; actionTarget = null },
+            onDelete = { deleting = record; actionTarget = null },
+        )
+    }
+
+    editing?.let { record ->
+        RecordEditDialog(
+            record = record,
+            onDismiss = { editing = null },
+            onSave = { fields -> vm.updateRecord(record.date, record, fields) { editing = null } },
+        )
+    }
+
+    reanalyzing?.let { record ->
+        ReanalyzeDialog(
+            record = record,
+            onDismiss = { reanalyzing = null },
+            onRun = { instruction ->
+                vm.reanalyzeRecord(record.date, record, instruction) { reanalyzing = null }
+            },
+        )
+    }
+
+    deleting?.let { record ->
+        DeleteConfirmDialog(
+            record = record,
+            onDismiss = { deleting = null },
+            onConfirm = { vm.deleteRecord(record.date, record) { deleting = null } },
         )
     }
 }
@@ -211,11 +259,17 @@ private fun SectionTitle(title: String, count: Int) {
 }
 
 @Composable
-private fun RecordRow(record: MealRecord, vm: DietViewModel, date: String) {
+private fun RecordRow(
+    record: MealRecord,
+    vm: DietViewModel,
+    date: String,
+    onClick: () -> Unit,
+) {
     Surface(
         color = Palette.Surface,
         shape = RoundedCornerShape(Radii.md),
         modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (record.hasPhoto) {

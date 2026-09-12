@@ -74,6 +74,55 @@
     "default": "",
     "hint": "APP 里不拍照、直接打字描述吃了什么时使用；留空用内置营养师提示词"
   },
+  "profile_height_cm": {
+    "description": "身高（cm）",
+    "type": "float",
+    "default": 170,
+    "hint": "APP 里也能改，改完会按公式重算每日目标"
+  },
+  "profile_weight_kg": {
+    "description": "体重（kg）",
+    "type": "float",
+    "default": 65
+  },
+  "profile_age": {
+    "description": "年龄",
+    "type": "int",
+    "default": 30
+  },
+  "profile_sex": {
+    "description": "性别",
+    "type": "string",
+    "options": [
+      "male",
+      "female"
+    ],
+    "default": "male"
+  },
+  "profile_activity": {
+    "description": "活动量",
+    "type": "string",
+    "options": [
+      "sedentary",
+      "light",
+      "moderate",
+      "active",
+      "very_active"
+    ],
+    "default": "light",
+    "hint": "久坐 / 轻度 / 中度 / 高度 / 极高"
+  },
+  "profile_goal": {
+    "description": "目标",
+    "type": "string",
+    "options": [
+      "lose",
+      "maintain",
+      "gain"
+    ],
+    "default": "maintain",
+    "hint": "减脂 / 维持 / 增重"
+  },
   "target_calories_kcal": {
     "description": "每日热量目标（kcal）",
     "type": "int",

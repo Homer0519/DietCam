@@ -13,19 +13,32 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -38,8 +51,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -62,55 +77,78 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { Home, Camera }
+private enum class Tab(val label: String, val icon: ImageVector) {
+    Home("主页", Icons.Filled.Home),
+    Calendar("日历", Icons.Filled.CalendarMonth),
+    Memories("回忆", Icons.Filled.History),
+    Profile("我的", Icons.Filled.Person),
+}
 
 @Composable
 private fun DietCamApp(vm: DietViewModel) {
-    var screen by rememberSaveable { mutableStateOf(Screen.Home) }
+    var tab by rememberSaveable { mutableStateOf(Tab.Home) }
+    var showCamera by rememberSaveable { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     val notice by vm.notice.collectAsStateWithLifecycle()
 
-    // 首次进入且未配置时，直接引导去设置
     LaunchedEffect(Unit) {
         if (!vm.isConfigured()) showSettings = true
         vm.refreshHome()
+        vm.refreshProfile()
     }
 
-    // 从相机回到主页时刷新一下数据
-    LaunchedEffect(screen) {
-        if (screen == Screen.Home) vm.refreshHome()
+    LaunchedEffect(tab) {
+        when (tab) {
+            Tab.Home -> vm.refreshHome()
+            Tab.Calendar -> vm.refreshCalendar(java.time.YearMonth.now().toString())
+            Tab.Memories -> vm.refreshHistory()
+            Tab.Profile -> vm.refreshProfile()
+        }
     }
 
-    BackHandler(enabled = screen == Screen.Camera) {
+    BackHandler(enabled = showCamera) {
         vm.resetCapture()
-        screen = Screen.Home
+        showCamera = false
     }
 
-    AnimatedContent(
-        targetState = screen,
-        transitionSpec = {
-            if (targetState == Screen.Camera) {
-                (slideInHorizontally(tween(260)) { it / 3 } + fadeIn(tween(220))) togetherWith
-                    (slideOutHorizontally(tween(260)) { -it / 6 } + fadeOut(tween(160)))
+    Box(Modifier.fillMaxSize().background(Palette.Background)) {
+        AnimatedContent(
+            targetState = showCamera,
+            transitionSpec = {
+                if (targetState) {
+                    (slideInHorizontally(tween(260)) { it / 3 } + fadeIn(tween(220))) togetherWith
+                        (slideOutHorizontally(tween(260)) { -it / 6 } + fadeOut(tween(160)))
+                } else {
+                    (slideInHorizontally(tween(260)) { -it / 6 } + fadeIn(tween(220))) togetherWith
+                        (slideOutHorizontally(tween(260)) { it / 3 } + fadeOut(tween(160)))
+                }
+            },
+            label = "camera",
+        ) { camera ->
+            if (camera) {
+                CameraScreen(
+                    vm = vm,
+                    onClose = { showCamera = false },
+                    onOpenSettings = { showSettings = true },
+                )
             } else {
-                (slideInHorizontally(tween(260)) { -it / 6 } + fadeIn(tween(220))) togetherWith
-                    (slideOutHorizontally(tween(260)) { it / 3 } + fadeOut(tween(160)))
-            }
-        },
-        label = "screen",
-    ) { target ->
-        when (target) {
-            Screen.Home -> HomeScreen(
-                vm = vm,
-                onOpenCamera = { screen = Screen.Camera },
-                onOpenSettings = { showSettings = true },
-            )
+                Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(1f)) {
+                        when (tab) {
+                            Tab.Home -> HomeScreen(
+                                vm = vm,
+                                onOpenCamera = { showCamera = true },
+                                onOpenSettings = { showSettings = true },
+                            )
 
-            Screen.Camera -> CameraScreen(
-                vm = vm,
-                onClose = { screen = Screen.Home },
-                onOpenSettings = { showSettings = true },
-            )
+                            Tab.Calendar -> CalendarScreen(vm)
+                            Tab.Memories -> MemoriesScreen(vm)
+                            Tab.Profile -> ProfileScreen(vm, onOpenSettings = { showSettings = true })
+                        }
+                    }
+                    BottomNav(current = tab, onSelect = { tab = it })
+                }
+            }
         }
     }
 
@@ -136,6 +174,47 @@ private fun DietCamApp(vm: DietViewModel) {
 }
 
 @Composable
+private fun BottomNav(current: Tab, onSelect: (Tab) -> Unit) {
+    Surface(color = Palette.Surface, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Tab.entries.forEach { item ->
+                val selected = item == current
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(Radii.sm))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { onSelect(item) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        item.icon,
+                        contentDescription = item.label,
+                        tint = if (selected) Palette.Accent else Palette.TextTertiary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        item.label,
+                        color = if (selected) Palette.Accent else Palette.TextTertiary,
+                        fontSize = 10.5.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SettingsDialog(
     current: DietSettings,
     onDismiss: () -> Unit,
@@ -155,26 +234,11 @@ private fun SettingsDialog(
                     .heightIn(max = 460.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
-                Field(
-                    value = baseUrl,
-                    onValueChange = { baseUrl = it },
-                    label = "AstrBot 地址",
-                    placeholder = "http://1.2.3.4:6185",
-                )
+                Field(baseUrl, { baseUrl = it }, "AstrBot 地址", "http://1.2.3.4:6185")
                 Spacer(Modifier.height(10.dp))
-                Field(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    label = "AstrBot API Key",
-                    placeholder = "abk_...",
-                )
+                Field(apiKey, { apiKey = it }, "AstrBot API Key", "abk_...")
                 Spacer(Modifier.height(10.dp))
-                Field(
-                    value = secret,
-                    onValueChange = { secret = it },
-                    label = "签名密钥 (hmac_secret)",
-                    placeholder = "与插件配置一致",
-                )
+                Field(secret, { secret = it }, "签名密钥 (hmac_secret)", "与插件配置一致")
                 Spacer(Modifier.height(14.dp))
                 Surface(
                     color = Palette.SurfaceHigh,
@@ -195,9 +259,7 @@ private fun SettingsDialog(
                     )
                 }
                 Spacer(Modifier.height(12.dp))
-                TextButton(onClick = onTest) {
-                    Text("测试连接", color = Palette.Accent)
-                }
+                TextButton(onClick = onTest) { Text("测试连接", color = Palette.Accent) }
             }
         },
         confirmButton = {
@@ -210,9 +272,7 @@ private fun SettingsDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消", color = Palette.TextSecondary)
-            }
+            TextButton(onClick = onDismiss) { Text("取消", color = Palette.TextSecondary) }
         },
     )
 }
@@ -246,7 +306,7 @@ private fun ResultDialog(
     message: String,
     onDismiss: () -> Unit,
 ) {
-    val ok = title.contains("成功")
+    val ok = title.contains("成功") || title.contains("已")
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -267,7 +327,7 @@ private fun ResultDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text(if (ok) "好，开始用" else "知道了", color = Palette.Accent)
+                Text(if (ok) "好" else "知道了", color = Palette.Accent)
             }
         },
     )

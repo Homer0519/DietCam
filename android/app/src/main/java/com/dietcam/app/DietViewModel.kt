@@ -243,6 +243,150 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _capture.value = CaptureUiState.Live
     }
 
+    // ------------------------------------------------- 档案 / 日历 / 历史
+
+    private val _profile = MutableStateFlow<ProfileInfo?>(null)
+    val profile: StateFlow<ProfileInfo?> = _profile.asStateFlow()
+
+    private val _calendar = MutableStateFlow<CalendarMonth?>(null)
+    val calendar: StateFlow<CalendarMonth?> = _calendar.asStateFlow()
+
+    private val _history = MutableStateFlow<List<MealRecord>>(emptyList())
+    val history: StateFlow<List<MealRecord>> = _history.asStateFlow()
+
+    private val _busy = MutableStateFlow(false)
+    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+
+    fun refreshProfile() {
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank() || current.secret.isBlank()) return
+        viewModelScope.launch {
+            runCatching { DietApi(current).profile() }
+                .onSuccess { _profile.value = ProfileParse.info(it) }
+                .onFailure { _notice.value = Notice("读取档案失败", DietApi.friendlyMessage(it)) }
+        }
+    }
+
+    fun saveProfile(profile: BodyProfile, onDone: () -> Unit = {}) {
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank()) return
+        _busy.value = true
+        viewModelScope.launch {
+            try {
+                val json = DietApi(current).saveProfile(
+                    mapOf(
+                        "height_cm" to profile.heightCm,
+                        "weight_kg" to profile.weightKg,
+                        "age" to profile.age,
+                        "sex" to profile.sex,
+                        "activity" to profile.activity,
+                        "goal" to profile.goal,
+                    )
+                )
+                _profile.value = ProfileParse.info(json)
+                _notice.value = Notice(
+                    "目标已按新档案重算",
+                    "每日 " + json.optJSONObject("targets")?.optDouble("calories_kcal", 0.0)
+                        ?.toInt().toString() + " 千卡\n" +
+                        "蛋白质 " + json.optJSONObject("targets")?.optDouble("protein_g", 0.0)
+                        ?.toInt().toString() + " g",
+                )
+                refreshHome()
+                onDone()
+            } catch (e: Exception) {
+                _notice.value = Notice("保存档案失败", DietApi.friendlyMessage(e))
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun refreshCalendar(month: String) {
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank() || current.secret.isBlank()) return
+        viewModelScope.launch {
+            runCatching { DietApi(current).calendar(month) }
+                .onSuccess { _calendar.value = ProfileParse.calendar(it) }
+                .onFailure { _notice.value = Notice("读取日历失败", DietApi.friendlyMessage(it)) }
+        }
+    }
+
+    fun refreshHistory(days: Int = 30) {
+        val current = store.snapshot()
+        if (current.baseUrl.isBlank() || current.secret.isBlank()) return
+        viewModelScope.launch {
+            runCatching { DietApi(current).history(days) }
+                .onSuccess { json ->
+                    val list = mutableListOf<MealRecord>()
+                    json.optJSONArray("records")?.let { arr ->
+                        for (i in 0 until arr.length()) {
+                            arr.optJSONObject(i)?.let { list.add(JsonParse.record(it)) }
+                        }
+                    }
+                    _history.value = list
+                }
+                .onFailure { _notice.value = Notice("读取回忆失败", DietApi.friendlyMessage(it)) }
+        }
+    }
+
+    // ------------------------------------------------------ 单条记录操作
+
+    fun updateRecord(date: String, record: MealRecord, fields: Map<String, Any>, onDone: () -> Unit = {}) {
+        val current = store.snapshot()
+        _busy.value = true
+        viewModelScope.launch {
+            try {
+                DietApi(current).updateRecord(date, record.id, fields)
+                afterRecordChange()
+                onDone()
+            } catch (e: Exception) {
+                _notice.value = Notice("修改失败", DietApi.friendlyMessage(e))
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun deleteRecord(date: String, record: MealRecord, onDone: () -> Unit = {}) {
+        val current = store.snapshot()
+        _busy.value = true
+        viewModelScope.launch {
+            try {
+                DietApi(current).deleteRecord(date, record.id)
+                afterRecordChange()
+                onDone()
+            } catch (e: Exception) {
+                _notice.value = Notice("删除失败", DietApi.friendlyMessage(e))
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    fun reanalyzeRecord(date: String, record: MealRecord, instruction: String, onDone: () -> Unit = {}) {
+        val current = store.snapshot()
+        _busy.value = true
+        viewModelScope.launch {
+            try {
+                DietApi(current).reanalyzeRecord(date, record.id, instruction)
+                afterRecordChange()
+                _notice.value = Notice("已重新分析", "模型按新说明更新了这条记录。")
+                onDone()
+            } catch (e: Exception) {
+                _notice.value = Notice("重新分析失败", DietApi.friendlyMessage(e))
+            } finally {
+                _busy.value = false
+            }
+        }
+    }
+
+    /** 记录被改动后，把三个页面都刷新一遍。 */
+    private fun afterRecordChange() {
+        refreshHome()
+        _calendar.value?.let { refreshCalendar(it.month) }
+        refreshHistory()
+    }
+
     private suspend fun decodeScaled(file: File): Bitmap? = withContext(Dispatchers.IO) {
         if (!file.exists() || file.length() == 0L) return@withContext null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

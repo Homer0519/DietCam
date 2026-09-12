@@ -243,11 +243,16 @@ class FakeContext:
         self.registered_web_apis.append((route, handler, methods, desc))
 
     # 便于测试：按路径后缀直接调用对应 handler
-    def handler_for(self, suffix: str) -> Any:
+    # 同一个路径可能有多个方法（例如 /profile 的 GET 与 POST），
+    # 所以支持用 method 精确指定。
+    def handler_for(self, suffix: str, method: str | None = None) -> Any:
         for route, handler, methods, _ in self.registered_web_apis:
-            if route.endswith(suffix):
-                return handler
-        raise KeyError("未注册的路由: " + suffix)
+            if not route.endswith(suffix):
+                continue
+            if method is not None and method.upper() not in [m.upper() for m in methods]:
+                continue
+            return handler
+        raise KeyError("未注册的路由: %s (method=%s)" % (suffix, method))
 
     def routes(self) -> list[str]:
         return [r for r, _, _, _ in self.registered_web_apis]

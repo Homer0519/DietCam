@@ -180,7 +180,15 @@ fun CameraScreen(
             onSettings = onOpenSettings,
         )
 
-        Crossfade(targetState = state, label = "capture") { current ->
+        // 注意：Crossfade 的内容 lambda 不是 BoxScope，直接在里面写 Modifier.align()
+        // 不会作用于外层 Box，曾经把整条底栏顶到屏幕顶部并盖住返回按钮。
+        // 这里再套一层铺满的 Box，让里面的 align 真正生效。
+        Crossfade(
+            targetState = state,
+            modifier = Modifier.fillMaxSize(),
+            label = "capture",
+        ) { current ->
+            Box(Modifier.fillMaxSize()) {
             when (current) {
                 is CaptureUiState.Live -> LiveBar(
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -230,6 +238,7 @@ fun CameraScreen(
                     onRetry = { vm.resetCapture() },
                     onSettings = onOpenSettings,
                 )
+            }
             }
         }
     }
