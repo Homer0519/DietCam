@@ -94,8 +94,9 @@ fun MemoriesScreen(vm: DietViewModel) {
     }
 
     actionTarget?.let { record ->
-        RecordActionSheet(
+        RecordDetailDialog(
             record = record,
+            vm = vm,
             onDismiss = { actionTarget = null },
             onEdit = { editing = record; actionTarget = null },
             onReanalyze = { reanalyzing = record; actionTarget = null },
