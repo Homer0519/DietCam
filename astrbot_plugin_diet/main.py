@@ -58,10 +58,38 @@ except Exception:  # pragma: no cover - 兼容旧版本
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+
+# 清理孤儿照片时的最小年龄（秒）。
+# 刚上传、正在分析的图不能被误删，所以默认只清理「放了一会儿还没人认领」的。
+SWEEP_MIN_AGE = 60
+
+
+_LLM_TOOLS: list[str] = []
+
+
+def _llm_tool(name: str):
+    """注册 LLM 工具；老版本 AstrBot 没有 filter.llm_tool 时退化成空装饰器。
+
+    注意：AstrBot 是通过解析函数 docstring 里的 Args 段生成参数 schema 的
+    （不读类型注解），格式必须严格写成「参数名(类型): 描述」，否则参数会被静默丢弃。
+    """
+    deco = getattr(filter, "llm_tool", None)
+    if deco is None:  # pragma: no cover - 兼容旧版本
+        return lambda fn: fn
+    if name not in _LLM_TOOLS:
+        _LLM_TOOLS.append(name)
+    try:
+        return deco(name=name)
+    except TypeError:  # pragma: no cover - 更老的签名
+        return deco
+
+
+def _llm_tool_names() -> list[str]:
+    return list(_LLM_TOOLS)
 
 # 每日摄入目标（可在插件配置里改，也可由 APP 覆盖，覆盖值存在 state.json）
 DEFAULT_TARGETS = {
@@ -262,6 +290,12 @@ class DietPlugin(Star):
             (prefix + "/archive", self.api_archive, ["POST"], "archive a photo (base64)"),
             (prefix + "/records", self.api_records, ["GET"], "list one day records"),
             (prefix + "/photo", self.api_photo, ["GET"], "fetch an archived photo"),
+            (
+                prefix + "/cleanup",
+                self.api_cleanup,
+                ["GET", "POST"],
+                "remove archived photos that no record references",
+            ),
         ]
         for route, handler, methods, desc in routes:
             self.context.register_web_api(route, handler, methods, desc)
@@ -500,6 +534,67 @@ class DietPlugin(Star):
                 path.unlink()
             except OSError as exc:
                 logger.warning("[diet] 删除照片失败 %s: %s", path, exc)
+
+    def _discard_unrecorded_photo(self, day: str, name: str) -> None:
+        """照片已落盘但记录没写成 —— 删掉它。
+
+        这里就是「4 张照片 vs 2 条记录」的源头：早先照片先存盘、再调模型，
+        模型报错（例如 provider 模式解包异常）或用户中途断开时，照片就永远留在了
+        photos/ 里，没有任何记录指向它。
+        """
+        if not name:
+            return
+        self._delete_photo(day, name)
+        logger.info("[diet] 分析未成功，已清理未成记录的照片 %s/%s", day, name)
+
+    def _referenced_photos(self, day: str) -> set[str]:
+        """当天记录引用到的照片文件名集合。"""
+        used = set()
+        for record in self._load_records(day):
+            name = str(record.get("photo") or "")
+            if name:
+                used.add(name)
+        return used
+
+    def _orphan_photos(self, day: str, min_age_seconds: int = SWEEP_MIN_AGE) -> list[Path]:
+        """photos/<day>/ 里没有任何记录引用的照片。"""
+        day_dir = self.photo_dir / day
+        if not day_dir.is_dir():
+            return []
+        used = self._referenced_photos(day)
+        now = time.time()
+        out: list[Path] = []
+        for path in sorted(day_dir.iterdir()):
+            if not path.is_file() or path.name in used:
+                continue
+            if min_age_seconds > 0:
+                try:
+                    if now - path.stat().st_mtime < min_age_seconds:
+                        continue
+                except OSError:
+                    continue
+            out.append(path)
+        return out
+
+    def _sweep_orphans(self, day: str, min_age_seconds: int = SWEEP_MIN_AGE) -> list[str]:
+        """删掉孤儿照片，返回被删掉的文件名。"""
+        removed: list[str] = []
+        for path in self._orphan_photos(day, min_age_seconds):
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError as exc:
+                logger.warning("[diet] 清理孤儿照片失败 %s: %s", path, exc)
+        if removed:
+            logger.info("[diet] 已清理 %s 的 %d 张孤儿照片", day, len(removed))
+        return removed
+
+    def _all_days(self) -> list[str]:
+        """记录文件和照片目录里出现过的所有日期。"""
+        days = {p.stem for p in self.record_dir.glob("*.jsonl")}
+        if self.photo_dir.is_dir():
+            days.update(p.name for p in self.photo_dir.iterdir() if p.is_dir())
+        return sorted(days)
 
     @staticmethod
     def _sse(payload: dict) -> str:
@@ -878,7 +973,11 @@ class DietPlugin(Star):
         return json_response({"ok": True, "record": record})
 
     async def _stream_analyze(self, path, note, day, photo_name, source, moment):
-        """流式分析的 SSE 事件序列：start -> meta* -> delta* -> done|error。"""
+        """流式分析的 SSE 事件序列：start -> meta* -> delta* -> done|error。
+
+        照片在上游已经落盘了，所以这里的每条失败路径都必须把它删掉，
+        否则 photos/ 里会攒下一堆没有对应记录的孤儿图片。
+        """
         yield self._sse({"type": "start", "time": moment.strftime("%H:%M")})
         buf: list[str] = []
         engine = ""
@@ -892,15 +991,26 @@ class DietPlugin(Star):
                     yield self._sse({"type": "delta", "text": value})
         except Exception as exc:  # noqa: BLE001 - 错误要回传给客户端
             logger.error("[diet] 流式分析失败: %s", exc, exc_info=True)
+            self._discard_unrecorded_photo(day, photo_name)
             yield self._sse({"type": "error", "message": str(exc)[:300]})
             return
+        except BaseException:
+            # 用户按了「中断」或客户端断开连接：生成器被关闭，记录还没写成
+            self._discard_unrecorded_photo(day, photo_name)
+            raise
 
         parsed = self._parse_json("".join(buf))
         parsed["_engine"] = engine or "stream"
         record = self._build_record(
             moment, day, photo_name, parsed, source=source, note=note
         )
-        self._append_record(day, record)
+        try:
+            self._append_record(day, record)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[diet] 写入记录失败: %s", exc, exc_info=True)
+            self._discard_unrecorded_photo(day, photo_name)
+            yield self._sse({"type": "error", "message": "写入记录失败: " + str(exc)[:200]})
+            return
         logger.info("[diet] 流式归档 %s，%s kcal", photo_name or "(文字)", record["calories_kcal"])
         yield self._sse({"type": "done", "record": record})
 
@@ -1110,7 +1220,11 @@ class DietPlugin(Star):
 
         records, index = self._find_record(day, record_id)
         if index < 0:
-            return error_response("没有找到这条记录")
+            # 幂等：手机端列表可能是旧的（这条已经在别处删掉了），不该报错
+            swept = self._sweep_orphans(day)
+            return json_response(
+                {"ok": True, "already_gone": True, "swept": swept, "left": len(records)}
+            )
         removed = records.pop(index)
         self._rewrite_records(day, records)
 
@@ -1119,8 +1233,16 @@ class DietPlugin(Star):
         if photo and not any(str(r.get("photo") or "") == photo for r in records):
             self._delete_photo(day, photo)
 
-        logger.info("[diet] 已删除记录 %s/%s", day, record_id)
-        return json_response({"ok": True, "removed": removed, "left": len(records)})
+        # 顺手把这天剩下的孤儿照片也带走：以前分析失败遗留的、以及
+        # 记录早就删掉但照片还在的，都在这儿被收干净。
+        swept = self._sweep_orphans(day)
+
+        logger.info(
+            "[diet] 已删除记录 %s/%s，顺带清理 %d 张孤儿照片", day, record_id, len(swept)
+        )
+        return json_response(
+            {"ok": True, "removed": removed, "left": len(records), "swept": swept}
+        )
 
     async def api_record_reanalyze(self):
         """让模型按新的说明重新分析这条记录（有照片用照片，没有就用原文）。"""
@@ -1185,6 +1307,26 @@ class DietPlugin(Star):
         self._rewrite_records(day, records)
         logger.info("[diet] 已重新分析记录 %s/%s", day, record_id)
         return json_response({"ok": True, "record": updated})
+
+    async def api_cleanup(self):
+        """清理孤儿照片：photos/ 里没有任何记录引用的图片。
+
+        不带参数就清理所有日期，带 ?date=YYYY-MM-DD 只清理那一天。
+        """
+        if not self._authorized():
+            return error_response("unauthorized")
+        day = str(_pick(request.query, "date", "") or "")
+        if day and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return error_response("date 格式应为 YYYY-MM-DD")
+
+        days = [day] if day else self._all_days()
+        removed: dict[str, list[str]] = {}
+        for item in days:
+            gone = self._sweep_orphans(item)
+            if gone:
+                removed[item] = gone
+        total = sum(len(names) for names in removed.values())
+        return json_response({"ok": True, "count": total, "removed": removed})
 
     async def api_calendar(self):
         """某个月每天的摄入合计，供日历页展示。"""
@@ -1477,48 +1619,113 @@ class DietPlugin(Star):
 
     @filter.command("饮食")
     async def cmd_diet(self, event: AstrMessageEvent, *_ignored):
-        """查看饮食记录：/饮食、/饮食 昨天、/饮食 2026-06-27、/饮食 本周、/饮食 本月"""
+        """查看饮食记录：/饮食、/饮食 昨天、/饮食 本周、/饮食 本月、/饮食 清理"""
         self._remember_umo(event)
         raw = (event.message_str or "").strip()
         arg = re.sub(r"^[/／]?\s*饮食\s*", "", raw).strip()
         arg = arg.replace(" ", "")
-        now = dt.datetime.now(self.tz)
-        today = now.strftime("%Y-%m-%d")
+        today = dt.datetime.now(self.tz).strftime("%Y-%m-%d")
 
-        if arg in ("", "今天", "今日", "当天"):
-            yield event.plain_result(self._render_day(today))
+        if arg in ("清理", "清垃圾", "打扫"):
+            yield event.plain_result(self._cleanup_report([today]))
             return
-        if arg in ("昨天", "昨日"):
-            day = (now - dt.timedelta(days=1)).strftime("%Y-%m-%d")
-            yield event.plain_result(self._render_day(day))
+        if arg in ("清理全部", "全部清理", "清理所有", "清理历史"):
+            yield event.plain_result(self._cleanup_report(None))
             return
-        if arg in ("本周", "最近7天", "近7天", "周"):
-            days = [(now - dt.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
-            yield event.plain_result(self._render_range(days, "最近 7 天"))
+
+        if arg in ("", "今天", "今日", "当天", "昨天", "昨日", "前天"):
+            yield event.plain_result(self._render_day(self._resolve_day(arg)))
             return
-        if arg in ("本月", "这个月", "月"):
-            days = [
-                (now.replace(day=1) + dt.timedelta(days=i)).strftime("%Y-%m-%d")
-                for i in range(now.day)
-            ]
-            yield event.plain_result(self._render_range(days, now.strftime("%Y 年 %m 月")))
+        if arg in ("本周", "最近7天", "近7天", "周", "本月", "这个月", "月") or re.fullmatch(
+            r"最近\d+天", arg
+        ):
+            days, title = self._resolve_period(arg)
+            yield event.plain_result(self._render_range(days, title))
             return
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg):
-            yield event.plain_result(self._render_day(arg))
-            return
-        if re.fullmatch(r"\d{1,2}-\d{1,2}", arg):
-            guess = "%d-%s" % (now.year, arg.zfill(5))
-            yield event.plain_result(self._render_day(guess))
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg) or re.fullmatch(r"\d{1,2}-\d{1,2}", arg):
+            yield event.plain_result(self._render_day(self._resolve_day(arg)))
             return
 
         yield event.plain_result(
             "用法：\n"
-            "/饮食            今天\n"
+            "/饮食              今天\n"
             "/饮食 昨天\n"
-            "/饮食 2026-06-27  指定日期\n"
-            "/饮食 本周        最近 7 天汇总\n"
-            "/饮食 本月        当月汇总"
+            "/饮食 2026-06-27   指定日期\n"
+            "/饮食 本周         最近 7 天汇总\n"
+            "/饮食 本月         当月汇总\n"
+            "/饮食 最近14天     任意天数\n"
+            "/饮食 清理         删掉今天没有对应记录的孤儿照片\n"
+            "/饮食 清理全部     清理所有日期"
         )
+
+    def _resolve_day(self, raw: str) -> str:
+        """把「今天 / 昨天 / 前天 / 6-27」这类说法统一成 YYYY-MM-DD。"""
+        text = str(raw or "").strip()
+        now = dt.datetime.now(self.tz)
+        if text in ("", "今天", "今日", "当天"):
+            return now.strftime("%Y-%m-%d")
+        if text in ("昨天", "昨日"):
+            return (now - dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        if text == "前天":
+            return (now - dt.timedelta(days=2)).strftime("%Y-%m-%d")
+        if re.fullmatch(r"\d{1,2}-\d{1,2}", text):
+            return "%d-%s" % (now.year, text.zfill(5))
+        return text
+
+    def _resolve_period(self, raw: str) -> tuple[list[str], str]:
+        """把「本周 / 本月 / 最近N天 / 起~止」统一成 (日期列表, 标题)。"""
+        text = str(raw or "").strip()
+        now = dt.datetime.now(self.tz)
+
+        match = re.fullmatch(r"最近(\d+)天", text)
+        if match:
+            count = max(1, min(int(match.group(1)), 365))
+            days = [
+                (now - dt.timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range(count - 1, -1, -1)
+            ]
+            return days, "最近 %d 天" % count
+
+        if text in ("本月", "这个月", "月"):
+            days = [
+                (now.replace(day=1) + dt.timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range(now.day)
+            ]
+            return days, now.strftime("%Y 年 %m 月")
+
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}[~～到至]\d{4}-\d{2}-\d{2}", text):
+            start_raw, end_raw = re.split(r"[~～到至]", text)
+            try:
+                start = dt.date.fromisoformat(start_raw)
+                end = dt.date.fromisoformat(end_raw)
+            except ValueError:
+                start = end = now.date()
+            if end < start:
+                start, end = end, start
+            span = min((end - start).days, 366)
+            days = [(start + dt.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(span + 1)]
+            return days, "%s ~ %s" % (start_raw, end_raw)
+
+        # 兜底：最近 7 天（含本周）
+        days = [(now - dt.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+        return days, "最近 7 天"
+
+    def _cleanup_report(self, days: list[str] | None) -> str:
+        """清理孤儿照片并给出一句人话汇报。"""
+        targets = self._all_days() if days is None else list(days)
+        removed: dict[str, list[str]] = {}
+        for day in targets:
+            gone = self._sweep_orphans(day)
+            if gone:
+                removed[day] = gone
+        total = sum(len(names) for names in removed.values())
+        if total == 0:
+            where = "所有日期" if days is None else (targets[0] if targets else "今天")
+            return "🧹 " + where + " 没有多余的照片，photos/ 和记录是对得上的。"
+        lines = ["🧹 清理完成，删掉 %d 张没有对应记录的照片：" % total]
+        for day in sorted(removed):
+            lines.append("· %s：%d 张" % (day, len(removed[day])))
+        return "\n".join(lines)
 
     @filter.command("饮食状态")
     async def cmd_diet_status(self, event: AstrMessageEvent, *_ignored):
@@ -1528,23 +1735,123 @@ class DietPlugin(Star):
         today = self._today()
         count = len(self._load_records(today))
         photo_count = len(list((self.photo_dir / today).glob("*"))) if (self.photo_dir / today).is_dir() else 0
+        tools_hint = (
+            "已注册 %d 个（%s，可以直接用自然语言问记录）" % (len(_llm_tool_names()), "、".join(_llm_tool_names()))
+            if _llm_tool_names()
+            else "未注册（AstrBot 版本过低，只能用指令查）"
+        )
+        orphans = self._orphan_photos(today, 0)
+        orphan_hint = (
+            "\n⚠️ 其中 %d 张没有对应记录，可发「/饮食 清理」收掉" % len(orphans) if orphans else ""
+        )
         yield event.plain_result(
             "🍱 饮食插件状态\n"
             "版本：%s\n"
             "Web API：%s\n"
+            "LLM 工具：%s\n"
             "模型模式：%s\n"
             "模型：%s\n"
             "数据目录：%s\n"
-            "今日记录：%d 条，照片：%d 张"
+            "今日记录：%d 条，照片：%d 张%s"
             % (
                 PLUGIN_VERSION,
                 "已启用" if WEB_API else "不可用（AstrBot 版本过低）",
+                tools_hint,
                 mode,
                 model,
                 self.data_dir,
                 count,
                 photo_count,
+                orphan_hint,
             )
+        )
+
+    # ------------------------------------------------------- LLM 工具（只读）
+    # 注册成 AstrBot 的 function tool 之后，模型在回答前能自己去翻记录，
+    # 于是可以直接问「我这周蛋白质够不够」「上次吃鸡翅是什么时候」。
+    #
+    # 注意：AstrBot 靠解析下面 docstring 里的 Args 段生成参数 schema，
+    # 格式必须严格写成「参数名(类型): 描述」，写错了参数会被静默丢弃。
+
+    @_llm_tool("diet_query_day")
+    async def tool_query_day(self, event: AstrMessageEvent, date: str):
+        """查询某一天的饮食记录明细：每一餐吃了什么、多少热量、三大营养素，以及当日合计。
+
+        Args:
+            date(string): 日期。可以是「今天」「昨天」「前天」，或 YYYY-MM-DD 格式的具体日期。
+        """
+        day = self._resolve_day(str(date or ""))
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            yield event.plain_result(
+                "日期无法识别：%s。请用「今天」「昨天」或 YYYY-MM-DD 格式。" % date
+            )
+            return
+        yield event.plain_result(self._render_day(day))
+
+    @_llm_tool("diet_query_range")
+    async def tool_query_range(self, event: AstrMessageEvent, period: str):
+        """查询一段时间的饮食汇总：每天的热量与三大营养素、区间合计和日均摄入。
+
+        Args:
+            period(string): 时间范围。可选「今天」「昨天」「本周」「本月」「最近7天」「最近30天」「最近90天」，或「2026-06-01~2026-06-30」这样的起止区间。
+        """
+        text = str(period or "").strip()
+        if text in ("今天", "今日", "当天", "昨天", "昨日", "前天"):
+            yield event.plain_result(self._render_day(self._resolve_day(text)))
+            return
+        days, title = self._resolve_period(text)
+        yield event.plain_result(self._render_range(days, title))
+
+    @_llm_tool("diet_search")
+    async def tool_search(self, event: AstrMessageEvent, keyword: str, days: int = 30):
+        """在最近的饮食记录里按关键词搜索，用来回答「什么时候吃过鸡翅」「这周喝奶茶了吗」这类问题。
+
+        Args:
+            keyword(string): 要搜索的关键词，例如「鸡翅」「奶茶」「米饭」。
+            days(number): 往前搜索多少天，默认 30，最多 180。
+        """
+        word = str(keyword or "").strip()
+        if not word:
+            yield event.plain_result("请给出要搜索的关键词。")
+            return
+        try:
+            span = int(days)
+        except (TypeError, ValueError):
+            span = 30
+        span = max(1, min(span, 180))
+
+        now = dt.datetime.now(self.tz)
+        hits: list[str] = []
+        for offset in range(span):
+            day = (now - dt.timedelta(days=offset)).strftime("%Y-%m-%d")
+            for record in self._load_records(day):
+                haystack = [str(record.get("title") or ""), str(record.get("advice") or "")]
+                for item in record.get("items") or []:
+                    if isinstance(item, dict):
+                        haystack.append(str(item.get("name") or ""))
+                if word not in " ".join(haystack):
+                    continue
+                hits.append(
+                    "%s %s %s｜%s · %g kcal"
+                    % (
+                        day,
+                        record.get("time", ""),
+                        record.get("meal", ""),
+                        record.get("title", ""),
+                        _f(record.get("calories_kcal")),
+                    )
+                )
+                if len(hits) >= 20:
+                    break
+            if len(hits) >= 20:
+                break
+
+        if not hits:
+            yield event.plain_result("最近 %d 天里没有找到含「%s」的记录。" % (span, word))
+            return
+        body = "\n".join("· " + line for line in hits)
+        yield event.plain_result(
+            "🔍 最近 %d 天里含「%s」的记录（最多列 20 条）：\n\n%s" % (span, word, body)
         )
 
     async def terminate(self):

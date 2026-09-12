@@ -13,6 +13,7 @@ AstrBot 的 PluginMultiDict 并不是 dict 的子类，而插件里用 isinstanc
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import types
 from pathlib import Path
@@ -300,9 +301,25 @@ def install(plugin_data_dir: Path) -> tuple[_Logger, FakeContext]:
             return fn
         return deco
 
+    registered_llm_tools: dict[str, Any] = {}
+
+    def llm_tool(name: str | None = None, **_k: Any):
+        def deco(fn):
+            fn.__is_llm_tool__ = True
+            fn.__llm_tool_name__ = name or fn.__name__
+            registered_llm_tools[fn.__llm_tool_name__] = fn
+            return fn
+        return deco
+
     mod("astrbot")
     mod("astrbot.api", logger=logger)
-    mod("astrbot.api.event", filter=types.SimpleNamespace(command=command), AstrMessageEvent=FakeEvent)
+    mod(
+        "astrbot.api.event",
+        filter=types.SimpleNamespace(
+            command=command, llm_tool=llm_tool, llm_tools=registered_llm_tools
+        ),
+        AstrMessageEvent=FakeEvent,
+    )
     mod("astrbot.api.star", Context=FakeContext, Star=FakeStar)
     mod(
         "astrbot.api.web",
@@ -356,6 +373,60 @@ def load_plugin(config: dict | None = None, module_name: str = "diet_main_under_
     context = FakeContext(plugin_data_dir)
     instance = module.DietPlugin(context=context, config=config or {})
     return module, instance, context
+
+
+# --------------------------------------------------------------------------
+# LLM 工具（对照 AstrBot 对 docstring 的解析）
+# --------------------------------------------------------------------------
+
+# AstrBot 用正则从 docstring 的 Args 段里抠参数：名字(类型): 描述
+_TOOL_ARG_RE = re.compile(r"^\s*(\w+)\s*\(([^)]*)\)\s*:\s*(.+)$")
+
+
+def parse_tool_args(doc: str) -> list[dict]:
+    """复刻 AstrBot 对 llm_tool docstring 的解析。
+
+    上游只认「参数名(类型): 描述」这一种写法，且 **不读类型注解**：
+    Args 段写错 / 漏写，参数 schema 就是空的，LLM 传来的实参会静默丢失。
+    所以测试里必须真的按这个规则解析一遍，而不是只看函数签名。
+    """
+    args: list[dict] = []
+    inside = False
+    for line in (doc or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Args:"):
+            inside = True
+            continue
+        if not inside or not stripped:
+            continue
+        match = _TOOL_ARG_RE.match(stripped)
+        if not match:
+            continue
+        name, type_name, desc = match.groups()
+        args.append({"name": name, "type": type_name.strip(), "description": desc.strip()})
+    return args
+
+
+def llm_tools() -> dict[str, Any]:
+    """当前已注册的 LLM 工具（名字 -> 函数）。"""
+    event_mod = sys.modules.get("astrbot.api.event")
+    if event_mod is None:
+        return {}
+    return dict(getattr(event_mod.filter, "llm_tools", {}))
+
+
+async def call_llm_tool(plugin: Any, name: str, event: FakeEvent, **kwargs: Any) -> str:
+    """按 AstrBot 的方式调用一个 LLM 工具，把 plain_result 拼成字符串返回。"""
+    fn = llm_tools().get(name)
+    if fn is None:
+        raise KeyError("未注册的 LLM 工具: %s" % name)
+    out: list[str] = []
+    async for item in fn(plugin, event, **kwargs):
+        if isinstance(item, tuple) and len(item) == 2:
+            out.append(str(item[1]))
+        else:
+            out.append(str(item))
+    return "\n".join(out)
 
 
 def set_request(module: types.ModuleType, request: PluginRequest) -> None:

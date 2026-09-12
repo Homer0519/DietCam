@@ -11,6 +11,8 @@
     4. GET  /photo         取回归档照片
     5. 安全校验：伪造签名 / 无签名 / 路径穿越
     6. 聊天里的 /饮食 输出
+    6b.注册给模型的 LLM 工具（模型自己去查记录）
+    6c.孤儿照片清理
     7. 磁盘文件结构
 
 视觉模型用桩替代，不需要任何模型服务即可运行。
@@ -20,9 +22,11 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import os
 import shutil
 import struct
 import sys
+import time
 import zlib
 from pathlib import Path
 
@@ -382,6 +386,40 @@ async def main() -> int:
         for ln in (await run_cmd(cmd)).splitlines():
             print("    " + ln)
         print("    " + "-" * 58)
+
+    # 6b. LLM 工具：模型自己去查，不用敲指令
+    print()
+    print("[6b] 注册给模型的 LLM 工具（直接问「我这周蛋白质够吗」即可）")
+    for tool_name, fn in sorted(stub.llm_tools().items()):
+        args = stub.parse_tool_args(fn.__doc__)
+        print("    %-18s 参数：%s" % (
+            tool_name,
+            "、".join("%s(%s)" % (a["name"], a["type"]) for a in args) or "无",
+        ))
+    print()
+    print("    模型问一句「我这周吃过鸡蛋吗」，工具返回：")
+    print("    " + "-" * 58)
+    hit = await stub.call_llm_tool(plugin, "diet_search", Ev("查鸡蛋"), keyword="蛋", days=30)
+    for ln in hit.splitlines():
+        print("    " + ln)
+    print("    " + "-" * 58)
+
+    # 6c. 孤儿照片清理
+    print()
+    print("[6c] 孤儿照片清理（照片比记录多的时候）")
+    orphan_day = plugin._today()
+    orphan_dir = plugin.photo_dir / orphan_day
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    orphan = orphan_dir / "000000_orphan0.png"
+    orphan.write_bytes(b"x")
+    old = time.time() - 3600
+    os.utime(orphan, (old, old))
+    print("    造一张没人认领的 %s -> 孤儿列表：%s" % (
+        orphan.name, [p.name for p in plugin._orphan_photos(orphan_day)]))
+    print("    发送 /饮食 清理  ->")
+    for ln in (await run_cmd("/饮食 清理")).splitlines():
+        print("      " + ln)
+    print("    清理后孤儿列表：%s" % [p.name for p in plugin._orphan_photos(orphan_day)])
 
     # 7. 磁盘
     print()

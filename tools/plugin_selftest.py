@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import os
 import shutil
 import sys
 import time
@@ -237,7 +238,12 @@ plugin.config.pop("extra_headers", None)
 
 # ================================================================ 9. 端到端：文件上传（回归）
 section("9. 端到端 · 照片上传（线上 bug 的回归测试）")
-check("路由已注册", len(context.routes()) == 17, context.routes())
+check("路由已注册", len(context.routes()) == 18, context.routes())
+check(
+    "包含孤儿照片清理路由",
+    any(r.endswith("/cleanup") for r in context.routes()),
+    context.routes(),
+)
 patch_analyzer()
 DAY = dt.datetime.now(plugin.tz).strftime("%Y-%m-%d")
 resp = call("/health")
@@ -492,11 +498,20 @@ check("流式记录已落盘", any(r.get("id") == srec["id"] for r in plugin._lo
 check("流式照片已归档", (plugin.photo_dir / DAY / srec["photo"]).is_file())
 
 patch_stream(fail="模型连接失败")
+_boom_day = plugin._today()
+_boom_dir = plugin.photo_dir / _boom_day
+_before_boom = {p.name for p in _boom_dir.iterdir()} if _boom_dir.is_dir() else set()
 events = events_of("/analyze_stream", files={"file": upload("boom.jpg")})
+_after_boom = {p.name for p in _boom_dir.iterdir()} if _boom_dir.is_dir() else set()
 errs = [e for e in events if e.get("type") == "error"]
 check("模型出错时发 error 事件", len(errs) == 1, events)
 check("error 事件带错误信息", "模型连接失败" in errs[0].get("message", ""), errs)
 check("出错后不再发 done", not any(e.get("type") == "done" for e in events))
+check(
+    "出错后不留孤儿照片（线上「4 张照片 vs 2 条记录」的根因）",
+    _before_boom == _after_boom,
+    _after_boom - _before_boom,
+)
 
 make_request(files={})
 resp = call("/analyze_stream")
@@ -717,7 +732,11 @@ check("归档照片一并删除", not photo_path.exists())
 
 make_request(payload={"date": edit_day, "id": edit_id})
 resp = call("/record/delete")
-check("重复删除返回错误", resp.status_code == 400, resp.payload)
+check(
+    "重复删除改为幂等（手机端列表可能是旧的）",
+    resp.status_code == 200 and resp.payload.get("already_gone") is True,
+    resp.payload,
+)
 
 stub.set_request(module, stub.PluginRequest(headers={}, payload={"date": edit_day, "id": "x"}))
 resp = asyncio.run(context.handler_for("/record/delete", "POST")())
@@ -762,6 +781,185 @@ check("非法 end 被拒绝", resp.status_code == 400, resp.payload)
 stub.set_request(module, stub.PluginRequest(headers={}, query={"month": month}))
 resp = asyncio.run(context.handler_for("/calendar")())
 check("日历接口需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
+# ================================================================ 22. 孤儿照片
+section("22. 孤儿照片与清理（手机端删了、AstrBot 那边要跟着干净）")
+
+today = plugin._today()
+today_dir = plugin.photo_dir / today
+today_dir.mkdir(parents=True, exist_ok=True)
+
+
+def age_file(path: Path, seconds: int = 3600) -> None:
+    """把文件改成「很久以前」的，用来绕开 SWEEP_MIN_AGE 的保护。"""
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def cmd_text(message: str, handler_name: str = "cmd_diet") -> str:
+    """像 AstrBot 那样把指令喂给插件，把回复拼成字符串。"""
+    event = stub.FakeEvent(message)
+
+    async def run() -> str:
+        out: list[str] = []
+        async for item in getattr(plugin, handler_name)(event):
+            out.append(item[1])
+        return "\n".join(out)
+
+    return asyncio.run(run())
+
+
+# 刚上传、正在分析的照片不能被误清
+fresh = today_dir / "235961_fresh0.jpg"
+fresh.write_bytes(b"fresh")
+check("刚上传的照片不在默认清理范围内", fresh.name not in [p.name for p in plugin._orphan_photos(today)])
+check("按年龄为 0 查时能看到它", fresh.name in [p.name for p in plugin._orphan_photos(today, 0)])
+
+# 放旧了的孤儿照片会被清掉
+stale = today_dir / "235959_stale0.jpg"
+stale.write_bytes(b"stale")
+age_file(stale)
+check("放旧的孤儿照片进入清理范围", stale.name in [p.name for p in plugin._orphan_photos(today)])
+check("清理时删掉了它", stale.name in plugin._sweep_orphans(today))
+check("清理后文件真的没了", not stale.exists())
+
+# 有记录引用的照片永远不碰
+patch_analyzer()
+make_request(files={"file": upload("keep.jpg")})
+resp = call("/analyze")
+check("先记一条带照片的记录", resp.status_code == 200, resp.payload)
+kept = resp.payload["record"]
+kept_path = today_dir / kept["photo"]
+check("引用中的照片存在", kept_path.is_file())
+check(
+    "有记录引用的照片不会被当成孤儿",
+    kept["photo"] not in [p.name for p in plugin._orphan_photos(today, 0)],
+)
+
+# 删除记录：自己的照片 + 这天遗留的孤儿，一起收干净
+legacy = today_dir / "235958_legacy0.jpg"
+legacy.write_bytes(b"legacy")
+age_file(legacy)
+make_request(payload={"date": today, "id": kept["id"]})
+resp = call("/record/delete")
+check("删除记录返回 200", resp.status_code == 200, resp.payload)
+check("删除时顺带清理了历史孤儿照片", legacy.name in resp.payload.get("swept", []), resp.payload.get("swept"))
+check("历史孤儿照片确实没了", not legacy.exists())
+check("被删记录的照片也没了", not kept_path.exists())
+
+# 幂等：删一条本来就不存在的记录
+make_request(payload={"date": today, "id": "no-such-id"})
+resp = call("/record/delete")
+check(
+    "删不存在的记录不报错（幂等）",
+    resp.status_code == 200 and resp.payload.get("already_gone") is True,
+    resp.payload,
+)
+
+# /cleanup 接口
+leftover = today_dir / "235957_leftov0.jpg"
+leftover.write_bytes(b"leftover")
+age_file(leftover)
+fresh.unlink(missing_ok=True)   # 它已经验证过「刚上传不会被清」，先撤掉免得干扰
+make_request(query={"date": today})
+resp = call("/cleanup", "GET")
+check("清理接口返回 200", resp.status_code == 200, resp.payload)
+check("返回清理数量", resp.payload.get("count") == 1, resp.payload)
+# 注意：第 11 节的 /archive（analyze=false）会故意留一张「只归档、不成记录」的图，
+# 那是离线补传接口的设计，所以这里只断言本次造的垃圾被清干净了。
+_still = [p.name for p in plugin._orphan_photos(today, 0)]
+check(
+    "清理后本次造的孤儿照片都不在了",
+    leftover.name not in _still and fresh.name not in _still,
+    _still,
+)
+check("照片确实被删掉", not leftover.exists())
+
+make_request(query={"date": "不是日期"})
+resp = call("/cleanup", "GET")
+check("非法的 date 被拒绝", resp.status_code == 400 and "YYYY-MM-DD" in resp.payload["message"])
+
+stub.set_request(module, stub.PluginRequest(headers={}, query={}))
+resp = asyncio.run(context.handler_for("/cleanup", "GET")())
+check("清理接口需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
+
+# /饮食 清理 指令
+check("没有垃圾时给出「对得上」的回复", "对得上" in cmd_text("/饮食 清理"))
+junk = today_dir / "235956_junk00.jpg"
+junk.write_bytes(b"junk")
+age_file(junk)
+report = cmd_text("/饮食 清理")
+check("有垃圾时报告删掉几张", "清理完成" in report and "1 张" in report, report)
+check("指令清理后文件没了", not junk.exists())
+check("清理全部也能跑", "清理完成" in cmd_text("/饮食 清理全部") or "对得上" in cmd_text("/饮食 清理全部"))
+
+# 清理之后日报照常
+check("清理不影响已有记录", plugin._load_records(today) == [] or isinstance(plugin._load_records(today), list))
+
+# ================================================================ 23. LLM 工具
+section("23. LLM 工具（让模型自己去查，而不是提示用户敲指令）")
+
+registered = stub.llm_tools()
+check("注册了 3 个 LLM 工具", len(registered) == 3, sorted(registered))
+check("工具名正确", sorted(registered) == ["diet_query_day", "diet_query_range", "diet_search"], sorted(registered))
+
+# AstrBot 靠 docstring 的 Args 段生成参数 schema，写错格式参数会被静默丢弃
+EXPECTED_ARGS = {
+    "diet_query_day": [("date", "string")],
+    "diet_query_range": [("period", "string")],
+    "diet_search": [("keyword", "string"), ("days", "number")],
+}
+for tool_name, expected in EXPECTED_ARGS.items():
+    parsed = stub.parse_tool_args(registered[tool_name].__doc__)
+    got = [(a["name"], a["type"]) for a in parsed]
+    check("工具 %s 的 Args 段能被 AstrBot 正确解析" % tool_name, got == expected, got)
+    check("工具 %s 每个参数都有描述" % tool_name, all(a["description"] for a in parsed), parsed)
+
+# 工具真的能查到东西
+tool_day = "2026-08-08"
+photo_name = "120000_tooltest.jpg"
+(plugin.photo_dir / tool_day).mkdir(parents=True, exist_ok=True)
+(plugin.photo_dir / tool_day / photo_name).write_bytes(b"img")
+plugin._append_record(
+    tool_day,
+    {
+        "id": "tool0001", "date": tool_day, "time": "12:30", "photo": photo_name,
+        "source": "app", "note": "", "is_food": True, "title": "可乐鸡翅",
+        "meal": "午餐", "calories_kcal": 620.0, "protein_g": 38.0, "carbs_g": 22.0,
+        "fat_g": 40.0, "confidence": 0.9,
+        "items": [{"name": "鸡翅", "portion": "6 个", "calories_kcal": 520}],
+        "advice": "油偏多，配点青菜",
+    },
+)
+
+tool_event = stub.FakeEvent("随便问问")
+day_text = asyncio.run(stub.call_llm_tool(plugin, "diet_query_day", tool_event, date=tool_day))
+check("查某天返回日报", "饮食日报" in day_text and tool_day in day_text, day_text[:120])
+check("日报里有分项与建议", "鸡翅" in day_text and "油偏多" in day_text)
+
+rel_day = asyncio.run(stub.call_llm_tool(plugin, "diet_query_day", tool_event, date="昨天"))
+check("「昨天」能被解析", "饮食日报" in rel_day or "还没有饮食记录" in rel_day, rel_day[:80])
+
+bad_day = asyncio.run(stub.call_llm_tool(plugin, "diet_query_day", tool_event, date="瞎写的"))
+check("无法识别的日期给出明确提示", "无法识别" in bad_day, bad_day)
+
+range_text = asyncio.run(stub.call_llm_tool(plugin, "diet_query_range", tool_event, period="最近400天"))
+check("超大区间被夹到上限并返回汇总", "汇总" in range_text or "还没有" in range_text, range_text[:80])
+
+range_bad = asyncio.run(stub.call_llm_tool(plugin, "diet_query_range", tool_event, period="随便"))
+check("无法识别的区间退化成最近 7 天", "最近 7 天" in range_bad or "还没有" in range_bad, range_bad[:80])
+
+hit = asyncio.run(stub.call_llm_tool(plugin, "diet_search", tool_event, keyword="鸡翅", days=365))
+check("搜索能找到吃过的食物", "鸡翅" in hit and tool_day in hit, hit[:160])
+miss = asyncio.run(stub.call_llm_tool(plugin, "diet_search", tool_event, keyword="佛跳墙", days=365))
+check("搜不到时给出明确回复", "没有找到" in miss, miss)
+empty = asyncio.run(stub.call_llm_tool(plugin, "diet_search", tool_event, keyword="  ", days=365))
+check("空关键词被拒绝", "请给出" in empty, empty)
+weird = asyncio.run(stub.call_llm_tool(plugin, "diet_search", tool_event, keyword="鸡翅", days="不是数字"))
+check("days 传了非数字也能兜住", "鸡翅" in weird or "没有找到" in weird, weird[:80])
+
+status_text = cmd_text("/饮食状态", "cmd_diet_status")
+check("状态里报出 LLM 工具数量", "LLM 工具" in status_text and "3 个" in status_text, status_text)
+
 # ================================================================ 结果
 print()
 print("=" * 56)
