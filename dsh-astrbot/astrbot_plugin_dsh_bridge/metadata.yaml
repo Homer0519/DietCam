@@ -1,0 +1,16 @@
+name: astrbot_plugin_dsh_bridge
+display_name: DSH Bridge
+short_desc: 把 AstrBot 收到的消息转给本机 DeepSeek Harness，并把结果发回原会话
+desc: 本机 DeepSeek Harness（DSH）主动长轮询连接公网 AstrBot；AstrBot 侧只负责收件、排队、回发，不需要 DSH 有公网入口。
+version: 1.0.0
+author: Homer0519
+repo: https://github.com/Homer0519/DietCam
+astrbot_version: ">=4.18,<5"
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - discord
+  - slack
+  - lark
+  - dingtalk
+  - webchat

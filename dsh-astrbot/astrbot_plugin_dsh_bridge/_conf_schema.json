@@ -1,0 +1,72 @@
+{
+  "enabled": {
+    "description": "启用转发",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后不再收件，但已注册的接口仍然可用（可用于排查）。"
+  },
+  "hmac_secret": {
+    "description": "共享密钥（HMAC 签名用）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "obvious_hint": true,
+    "hint": "自己随机生成一串，填到 DSH 侧插件的 secret 里。它与 AstrBot 的 API Key 是两把不同的钥匙。"
+  },
+  "forward_mode": {
+    "description": "转发哪些消息",
+    "type": "string",
+    "default": "direct",
+    "options": ["direct", "all"],
+    "hint": "direct：私聊 + 群里 @机器人；all：所有消息（群里闲聊也会被转发，慎用）。"
+  },
+  "suppress_default_llm": {
+    "description": "接管时不让 AstrBot 自己的大模型再回复一遍",
+    "type": "bool",
+    "default": true,
+    "hint": "只抑制默认 LLM 请求，不影响其它插件。"
+  },
+  "stop_event": {
+    "description": "接管时彻底终止事件传播",
+    "type": "bool",
+    "default": false,
+    "hint": "更彻底，但会连带屏蔽其它插件。除非有冲突，否则保持关闭。"
+  },
+  "forward_images": {
+    "description": "把图片一起转发给 DSH",
+    "type": "bool",
+    "default": true
+  },
+  "max_image_bytes": {
+    "description": "单张图片体积上限（字节）",
+    "type": "int",
+    "default": 8388608
+  },
+  "max_images": {
+    "description": "单条消息最多带几张图",
+    "type": "int",
+    "default": 4
+  },
+  "max_queue": {
+    "description": "待取队列上限",
+    "type": "int",
+    "default": 200,
+    "hint": "超出后丢弃最旧的未取事件，避免 AstrBot 内存被撑爆。"
+  },
+  "max_poll_seconds": {
+    "description": "单次长轮询最长挂起秒数",
+    "type": "int",
+    "default": 55
+  },
+  "max_message_chars": {
+    "description": "单条回复最大长度",
+    "type": "int",
+    "default": 1500,
+    "hint": "超过会按段落自动切分成多条发送。"
+  },
+  "debug": {
+    "description": "调试日志",
+    "type": "bool",
+    "default": false
+  }
+}

@@ -376,6 +376,7 @@ private fun PhotoViewerDialog(bitmap: Bitmap, onDismiss: () -> Unit) {
 @Composable
 fun RecordEditDialog(
     record: MealRecord,
+    running: Boolean = false,
     onDismiss: () -> Unit,
     onSave: (Map<String, Any>) -> Unit,
 ) {
@@ -389,7 +390,7 @@ fun RecordEditDialog(
     var note by remember { mutableStateOf(record.note) }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!running) onDismiss() },
         title = { Text("修改记录", fontWeight = FontWeight.SemiBold) },
         text = {
             Column(
@@ -429,14 +430,21 @@ fun RecordEditDialog(
                     fat.trim().toDoubleOrNull()?.let { fields["fat_g"] = it }
                     onSave(fields)
                 },
+                enabled = !running,
                 shape = RoundedCornerShape(Radii.sm),
                 colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
             ) {
-                Text("保存", color = Palette.OnAccent, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (running) "保存中…" else "保存",
+                    color = if (running) Palette.TextTertiary else Palette.OnAccent,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消", color = Palette.TextSecondary) }
+            TextButton(onClick = onDismiss) {
+                Text(if (running) "先关掉" else "取消", color = Palette.TextSecondary)
+            }
         },
     )
 }
@@ -445,6 +453,7 @@ fun RecordEditDialog(
 @Composable
 fun ReanalyzeDialog(
     record: MealRecord,
+    running: Boolean = false,
     onDismiss: () -> Unit,
     onRun: (String) -> Unit,
 ) {
@@ -452,7 +461,8 @@ fun ReanalyzeDialog(
         mutableStateOf(if (record.fromText) record.note else "")
     }
     AlertDialog(
-        onDismissRequest = onDismiss,
+        // 分析中不响应点外部，免得用户以为没反应而反复点
+        onDismissRequest = { if (!running) onDismiss() },
         title = { Text("让模型重新分析", fontWeight = FontWeight.SemiBold) },
         text = {
             Column {
@@ -470,6 +480,7 @@ fun ReanalyzeDialog(
                 OutlinedTextField(
                     value = instruction,
                     onValueChange = { instruction = it },
+                    enabled = !running,
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = {
                         Text("例如：这是两人份 / 少油 / 米饭没吃完", fontSize = 13.sp, color = Palette.TextTertiary)
@@ -482,19 +493,48 @@ fun ReanalyzeDialog(
                         cursorColor = Palette.Accent,
                     ),
                 )
+                if (running) {
+                    Spacer(Modifier.height(14.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Palette.Accent,
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            "正在重新分析…模型要十几秒到一分钟，结束后会告诉你改了什么",
+                            color = Palette.TextPrimary,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = { onRun(instruction.trim()) },
+                enabled = !running,
                 shape = RoundedCornerShape(Radii.sm),
                 colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
             ) {
-                Text("重新分析", color = Palette.OnAccent, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (running) "分析中…" else "重新分析",
+                    color = if (running) Palette.TextTertiary else Palette.OnAccent,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消", color = Palette.TextSecondary) }
+            TextButton(onClick = onDismiss) {
+                Text(
+                    if (running) "先关掉（后台继续）" else "取消",
+                    color = Palette.TextSecondary,
+                    fontSize = if (running) 12.sp else 14.sp,
+                )
+            }
         },
     )
 }
@@ -503,11 +543,12 @@ fun ReanalyzeDialog(
 @Composable
 fun DeleteConfirmDialog(
     record: MealRecord,
+    running: Boolean = false,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!running) onDismiss() },
         title = { Text("删除这条记录？", fontWeight = FontWeight.SemiBold) },
         text = {
             Text(
@@ -521,14 +562,21 @@ fun DeleteConfirmDialog(
         confirmButton = {
             Button(
                 onClick = onConfirm,
+                enabled = !running,
                 shape = RoundedCornerShape(Radii.sm),
                 colors = ButtonDefaults.buttonColors(containerColor = Palette.Danger),
             ) {
-                Text("删除", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (running) "删除中…" else "删除",
+                    color = if (running) Palette.TextTertiary else Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消", color = Palette.TextSecondary) }
+            TextButton(onClick = onDismiss) {
+                Text(if (running) "先关掉" else "取消", color = Palette.TextSecondary)
+            }
         },
     )
 }

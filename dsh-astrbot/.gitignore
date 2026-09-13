@@ -1,0 +1,10 @@
+# 测试临时目录
+tools/.test_tmp/
+tools/.wtest/
+
+# 本机状态
+state.json
+*.tmp
+__pycache__/
+*.pyc
+node_modules/

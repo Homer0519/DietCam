@@ -58,6 +58,7 @@ fun HomeScreen(
     var editing by remember { mutableStateOf<MealRecord?>(null) }
     var reanalyzing by remember { mutableStateOf<MealRecord?>(null) }
     var deleting by remember { mutableStateOf<MealRecord?>(null) }
+    val busy by vm.busy.collectAsStateWithLifecycle()
 
     Box(Modifier.fillMaxSize().background(Palette.Background)) {
         LazyColumn(
@@ -109,6 +110,7 @@ fun HomeScreen(
     editing?.let { record ->
         RecordEditDialog(
             record = record,
+            running = busy,
             onDismiss = { editing = null },
             onSave = { fields -> vm.updateRecord(record.date, record, fields) { editing = null } },
         )
@@ -117,6 +119,7 @@ fun HomeScreen(
     reanalyzing?.let { record ->
         ReanalyzeDialog(
             record = record,
+            running = busy,
             onDismiss = { reanalyzing = null },
             onRun = { instruction ->
                 vm.reanalyzeRecord(record.date, record, instruction) { reanalyzing = null }
@@ -127,6 +130,7 @@ fun HomeScreen(
     deleting?.let { record ->
         DeleteConfirmDialog(
             record = record,
+            running = busy,
             onDismiss = { deleting = null },
             onConfirm = { vm.deleteRecord(record.date, record) { deleting = null } },
         )

@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 /** 主页状态。 */
 data class HomeUiState(
@@ -368,9 +369,18 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _busy.value = true
         viewModelScope.launch {
             try {
-                DietApi(current).reanalyzeRecord(date, record.id, instruction)
+                val resp = DietApi(current).reanalyzeRecord(date, record.id, instruction)
+                val updated = resp.optJSONObject("record")?.let { JsonParse.record(it) }
                 afterRecordChange()
-                _notice.value = Notice("已重新分析", "模型按新说明更新了这条记录。")
+                // 光说一句「已重新分析」用户看不出模型到底改了什么，这里把前后差别列出来
+                _notice.value = Notice(
+                    "已重新分析",
+                    if (updated == null) {
+                        "模型已按新的说明重新估算「" + record.title + "」。"
+                    } else {
+                        describeChanges(record, updated)
+                    },
+                )
                 onDone()
             } catch (e: Exception) {
                 _notice.value = Notice("重新分析失败", DietApi.friendlyMessage(e))
@@ -378,6 +388,59 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
                 _busy.value = false
             }
         }
+    }
+
+    /** 把重新分析前后的差别写成人话，让用户一眼看到模型改了什么。 */
+    private fun describeChanges(before: MealRecord, after: MealRecord): String {
+        val lines = mutableListOf<String>()
+
+        if (!after.isFood) {
+            lines += "模型重新看过之后判断：这不是食物。"
+            if (before.title != after.title) {
+                lines += "标题　" + before.title + " → " + after.title
+            }
+            return lines.joinToString("\n")
+        }
+
+        val changed = before.title != after.title ||
+            before.nutrition != after.nutrition ||
+            before.advice != after.advice
+
+        if (before.title != after.title) {
+            lines += "标题　" + before.title + " → " + after.title
+        }
+        if (before.nutrition != after.nutrition) {
+            lines += diffLine("热量", before.nutrition.kcal, after.nutrition.kcal, " 千卡")
+            lines += diffLine("蛋白", before.nutrition.protein, after.nutrition.protein, " g")
+            lines += diffLine("碳水", before.nutrition.carbs, after.nutrition.carbs, " g")
+            lines += diffLine("脂肪", before.nutrition.fat, after.nutrition.fat, " g")
+        }
+
+        if (after.items.isNotEmpty()) {
+            val names = after.items.take(5).joinToString("、") { it.name }
+            lines += "分项　" + after.items.size + " 样：" + names +
+                (if (after.items.size > 5) " …" else "")
+        }
+        if (after.advice.isNotBlank() && after.advice != before.advice) {
+            lines += ""
+            lines += "新建议：" + after.advice
+        }
+
+        if (lines.isEmpty()) {
+            lines += if (changed) "模型已更新这条记录。" else "模型重新估算后，结论和之前一致。"
+        }
+        return lines.joinToString("\n")
+    }
+
+    private fun diffLine(label: String, before: Double, after: Double, unit: String): String {
+        val old = before.roundToInt()
+        val new = after.roundToInt()
+        val tail = when {
+            new > old -> "（+" + (new - old) + "）"
+            new < old -> "（" + (new - old) + "）"
+            else -> "（不变）"
+        }
+        return label + "　" + old + " → " + new + unit + tail
     }
 
     /** 记录被改动后，把三个页面都刷新一遍。 */
