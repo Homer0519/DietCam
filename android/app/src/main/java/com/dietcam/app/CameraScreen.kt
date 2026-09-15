@@ -140,7 +140,7 @@ fun CameraScreen(
                 context.contentResolver.openInputStream(uri)?.use { input ->
                     target.outputStream().use { output -> input.copyTo(output) }
                 }
-                vm.onPhotoCaptured(target)
+                vm.onPhotoCaptured(target, fromGallery = true)
             }.onFailure { vm.resetCapture() }
         }
     }
@@ -224,9 +224,10 @@ fun CameraScreen(
                     onNoteChange = { note = it },
                     onRetake = { vm.retake() },
                     onConfirm = {
-                        // 确认采用的那一刻才存进系统相册：
-                        // 这样「重拍」丢掉的照片不会白白留在相册里。
-                        if (PhotoGallery.saveToAlbum(context, current.file)) {
+                        // 只在确认采用的那一刻存，而且只存「刚拍的」：
+                        //  · 存确认而不是快门 —— 点「重拍」丢掉的照片不会留在相册里
+                        //  · 跳过相册选来的图 —— 它本来就在相册里，再存一份就是重复
+                        if (!current.fromGallery && PhotoGallery.saveToAlbum(context, current.file)) {
                             Toast.makeText(context, "原图已存入相册", Toast.LENGTH_SHORT).show()
                         }
                         vm.confirmPhoto(note.trim())

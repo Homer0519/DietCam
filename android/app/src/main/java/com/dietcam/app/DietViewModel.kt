@@ -28,8 +28,17 @@ data class HomeUiState(
 sealed interface CaptureUiState {
     data object Live : CaptureUiState
 
-    /** 画面已定格，等用户确认或重拍。 */
-    data class Reviewing(val file: File, val bitmap: Bitmap) : CaptureUiState
+    /**
+     * 画面已定格，等用户确认或重拍。
+     *
+     * [fromGallery] 区分这张图是刚拍的还是从相册选的 ——
+     * 从相册选来的图本来就在相册里，确认时不能再往回存一份。
+     */
+    data class Reviewing(
+        val file: File,
+        val bitmap: Bitmap,
+        val fromGallery: Boolean = false,
+    ) : CaptureUiState
 
     /** 正在分析，[streamed] 是模型已经吐出的内容。 */
     data class Analyzing(val streamed: String, val engine: String = "") : CaptureUiState
@@ -149,8 +158,8 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     // -------------------------------------------------------- 拍照与分析
 
-    /** 快门按下、照片已落盘：解码出来定格显示。 */
-    fun onPhotoCaptured(file: File) {
+    /** 照片已就绪（刚拍的或从相册选的）：解码出来定格显示。 */
+    fun onPhotoCaptured(file: File, fromGallery: Boolean = false) {
         viewModelScope.launch {
             val bitmap = decodeScaled(file)
             if (bitmap == null) {
@@ -158,7 +167,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
                 _capture.value = CaptureUiState.Failed("照片读取失败，请重试")
                 return@launch
             }
-            _capture.value = CaptureUiState.Reviewing(file, bitmap)
+            _capture.value = CaptureUiState.Reviewing(file, bitmap, fromGallery)
         }
     }
 
