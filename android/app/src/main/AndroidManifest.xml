@@ -4,6 +4,22 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 只有 Android 9 及以下把原图写进公共相册目录时才需要；10 起走 MediaStore 不需要 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!--
+      Android 11 起有软件包可见性限制：不声明这里，resolveActivity() 会对系统相册
+      返回 null，选图就会退回「文件管理」（ACTION_GET_CONTENT）。
+    -->
+    <queries>
+        <!-- 只限定 action、不限定 data：各家相册声明的 mimeType 不完全一样，
+             写死 image/* 反而可能匹配不上，于是又被判成「没有相册」。 -->
+        <intent>
+            <action android:name="android.intent.action.PICK" />
+        </intent>
+    </queries>
 
     <uses-feature
         android:name="android.hardware.camera.any"

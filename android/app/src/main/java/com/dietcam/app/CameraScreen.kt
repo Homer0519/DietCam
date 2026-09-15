@@ -3,6 +3,8 @@ package com.dietcam.app
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -117,13 +119,21 @@ fun CameraScreen(
         )
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { hasPermission = it }
+    // Android 9 及以下要写公共相册目录，得额外申请存储权限；10 起走 MediaStore 不需要
+    val neededPermissions = remember {
+        buildList {
+            add(Manifest.permission.CAMERA)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }.toTypedArray()
+    }
 
-    val galleryLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri ->
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted -> hasPermission = granted[Manifest.permission.CAMERA] == true }
+
+    val galleryLauncher = rememberLauncherForActivityResult(PickGalleryImage()) { uri ->
         if (uri != null) {
             runCatching {
                 val target = File(context.cacheDir, "picked_" + System.currentTimeMillis() + ".jpg")
@@ -136,7 +146,7 @@ fun CameraScreen(
     }
 
     LaunchedEffect(Unit) {
-        if (!hasPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+        if (!hasPermission) permissionLauncher.launch(neededPermissions)
     }
 
     // 定格图跟随 Reviewing 状态，之后的环节继续展示同一张
@@ -166,7 +176,7 @@ fun CameraScreen(
                 onReady = { capture = it },
             )
         } else if (state is CaptureUiState.Live) {
-            PermissionPrompt { permissionLauncher.launch(Manifest.permission.CAMERA) }
+            PermissionPrompt { permissionLauncher.launch(neededPermissions) }
         }
 
         // 顶部工具条
@@ -205,7 +215,7 @@ fun CameraScreen(
                     onCapture = {
                         capturePicture(context, capture) { file -> vm.onPhotoCaptured(file) }
                     },
-                    onPick = { galleryLauncher.launch("image/*") },
+                    onPick = { galleryLauncher.launch(Unit) },
                 )
 
                 is CaptureUiState.Reviewing -> ReviewBar(
@@ -213,7 +223,14 @@ fun CameraScreen(
                     note = note,
                     onNoteChange = { note = it },
                     onRetake = { vm.retake() },
-                    onConfirm = { vm.confirmPhoto(note.trim()) },
+                    onConfirm = {
+                        // 确认采用的那一刻才存进系统相册：
+                        // 这样「重拍」丢掉的照片不会白白留在相册里。
+                        if (PhotoGallery.saveToAlbum(context, current.file)) {
+                            Toast.makeText(context, "原图已存入相册", Toast.LENGTH_SHORT).show()
+                        }
+                        vm.confirmPhoto(note.trim())
+                    },
                 )
 
                 is CaptureUiState.Analyzing -> AnalyzingPanel(
