@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - 兼容旧版本
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.3.1"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
@@ -379,6 +379,21 @@ class DietPlugin(Star):
             return None
         return self.photo_dir / day / clean
 
+    def _time_hint(self) -> str:
+        """把「现在几点」告诉模型。
+
+        餐次判断经常错，根子就在模型根本不知道现在是几点 ——
+        晚上八点拍的饭，它可能顺手写成「加餐」。这里把时间连同各餐时段一起给它。
+        """
+        now = dt.datetime.now(self.tz)
+        week = "一二三四五六日"[now.weekday()]
+        return (
+            "\n\n当前时间：%s（周%s）。请据此判断 meal：早餐 05:00-10:00，"
+            "午餐 10:00-14:00，晚餐 17:00-21:00，其余时段算加餐或夜宵；"
+            "如果用户明确说了是哪一餐（例如「早饭」），以用户说的为准。"
+            % (now.strftime("%Y-%m-%d %H:%M"), week)
+        )
+
     @staticmethod
     def _guess_meal(moment: dt.datetime) -> str:
         hour = moment.hour
@@ -630,6 +645,8 @@ class DietPlugin(Star):
         note = (note or "").strip()
         if note:
             prompt = prompt + "\n\n用户的补充说明：" + note
+        # 让模型知道现在几点，餐次才判得准
+        prompt = prompt + self._time_hint()
         try:
             if mode == "astrbot_provider":
                 text, engine = await self._analyze_via_astrbot(path, prompt)
@@ -752,6 +769,8 @@ class DietPlugin(Star):
         note = (note or "").strip()
         if note:
             prompt = prompt + "\n\n用户的补充说明：" + note
+        # 让模型知道现在几点，餐次才判得准
+        prompt = prompt + self._time_hint()
 
         if mode != "openai_compatible":
             # 注意：_analyze() 返回的是 dict，不能当元组解包

@@ -276,7 +276,7 @@ private fun RecordRow(
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (record.hasPhoto) {
                 val bitmap = rememberArchivedPhoto(
-                    apiProvider = { DietApi(vm.settings()) },
+                    loader = { d, n -> vm.photoBytes(d, n) },
                     date = date,
                     name = record.photo,
                 )

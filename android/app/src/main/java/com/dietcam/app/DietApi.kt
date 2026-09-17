@@ -26,7 +26,11 @@ class DietApiException(
  * 请求走 AstrBot 的插件扩展路由 /api/v1/plugins/extensions/ 之下，
  * 用 plugin scope 的 API Key 鉴权，另外附带由共享密钥派生的 X-Diet-Token。
  */
-class DietApi(private val settings: DietSettings) {
+class DietApi(
+    private val settings: DietSettings,
+    /** 归档照片的本地磁盘缓存目录；为 null 则不缓存。 */
+    private val diskCache: File? = null,
+) : DietBackend {
 
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -62,12 +66,12 @@ class DietApi(private val settings: DietSettings) {
 
     // ------------------------------------------------------------- 基础接口
 
-    suspend fun health(): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun health(): JSONObject = withContext(Dispatchers.IO) {
         executeSync(newRequest(endpoint("/health")).get().build())
     }
 
     /** 主页概览：当日合计、每日目标、记录列表。 */
-    suspend fun summary(date: String? = null): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun summary(date: String?): JSONObject = withContext(Dispatchers.IO) {
         val url = if (date.isNullOrBlank()) {
             endpoint("/summary")
         } else {
@@ -77,7 +81,7 @@ class DietApi(private val settings: DietSettings) {
     }
 
     /** 调整每日目标（存在服务端 state.json）。 */
-    suspend fun updateTargets(targets: Map<String, Double>): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun updateTargets(targets: Map<String, Double>): JSONObject = withContext(Dispatchers.IO) {
         val body = JSONObject()
         targets.forEach { (k, v) -> body.put(k, v) }
         executeSync(newRequest(endpoint("/targets")).post(jsonBody(body)).build())
@@ -95,14 +99,65 @@ class DietApi(private val settings: DietSettings) {
     }
 
     /** 取回归档照片的原始字节。 */
-    suspend fun photoBytes(date: String, name: String): ByteArray = withContext(Dispatchers.IO) {
+    /**
+     * 取归档照片。
+     *
+     * 照片存在服务器上，但同一张只下一次：拿到之后写进本地磁盘缓存，
+     * 以后再显示这条记录就直接读本地，不再消耗流量（也快得多）。
+     */
+    override suspend fun photoBytes(date: String, name: String): ByteArray = withContext(Dispatchers.IO) {
+        val cached = cachedPhoto(date, name)
+        if (cached != null && cached.isFile && cached.length() > 0) {
+            return@withContext cached.readBytes()
+        }
         val url = endpoint("/photo") + "?date=" + date + "&name=" + name
-        streamClient.newCall(newRequest(url).get().build()).execute().use { resp ->
+        val bytes = streamClient.newCall(newRequest(url).get().build()).execute().use { resp ->
             if (!resp.isSuccessful) {
                 throw DietApiException("取图失败 HTTP " + resp.code, resp.code)
             }
             resp.body?.bytes() ?: ByteArray(0)
         }
+        if (bytes.isNotEmpty()) {
+            runCatching {
+                cached?.parentFile?.mkdirs()
+                cached?.writeBytes(bytes)
+                trimPhotoCache()
+            }
+        }
+        bytes
+    }
+
+    /** 缓存只留最近 200 张，免得日积月累把手机塞满。 */
+    private fun trimPhotoCache() {
+        val dir = diskCache ?: return
+        val files = dir.listFiles()?.filter { it.isFile } ?: return
+        if (files.size <= MAX_CACHED_PHOTOS) return
+        files.sortedBy { it.lastModified() }
+            .take(files.size - MAX_CACHED_PHOTOS)
+            .forEach { it.delete() }
+    }
+
+    /** 缓存文件路径；未配置缓存目录时返回 null。 */
+    private fun cachedPhoto(date: String, name: String): File? {
+        val dir = diskCache ?: return null
+        if (date.isBlank() || name.isBlank()) return null
+        return File(dir, PhotoCache.key(date, name) + ".img")
+    }
+
+    /** 清空本地照片缓存（设置页的「清理缓存」用）。 */
+    fun clearPhotoCache(): Long {
+        val dir = diskCache ?: return 0L
+        var freed = 0L
+        dir.listFiles()?.forEach { file ->
+            freed += file.length()
+            file.delete()
+        }
+        return freed
+    }
+
+    override suspend fun records(date: String): JSONObject = withContext(Dispatchers.IO) {
+        val url = endpoint("/records") + "?date=" + date
+        executeSync(newRequest(url).get().build())
     }
 
     // --------------------------------------------------------------- 流式
@@ -114,7 +169,7 @@ class DietApi(private val settings: DietSettings) {
      * （运行在 IO 线程，调用方自行保证线程安全）。
      * 返回最终解析好的 record。
      */
-    suspend fun analyzeStream(
+    override suspend fun analyzeStream(
         file: File,
         note: String,
         onDelta: (String) -> Unit,
@@ -133,7 +188,7 @@ class DietApi(private val settings: DietSettings) {
     }
 
     /** 流式分析一段文字描述。 */
-    suspend fun analyzeTextStream(
+    override suspend fun analyzeTextStream(
         text: String,
         onDelta: (String) -> Unit,
     ): JSONObject = withContext(Dispatchers.IO) {
@@ -240,21 +295,21 @@ class DietApi(private val settings: DietSettings) {
 
     // ------------------------------------------------- 档案 / 日历 / 历史
 
-    suspend fun profile(): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun profile(): JSONObject = withContext(Dispatchers.IO) {
         executeSync(newRequest(endpoint("/profile")).get().build())
     }
 
-    suspend fun saveProfile(fields: Map<String, Any>): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun saveProfile(fields: Map<String, Any>): JSONObject = withContext(Dispatchers.IO) {
         val body = JSONObject()
         fields.forEach { (k, v) -> body.put(k, v) }
         executeSync(newRequest(endpoint("/profile")).post(jsonBody(body)).build())
     }
 
-    suspend fun calendar(month: String): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun calendar(month: String): JSONObject = withContext(Dispatchers.IO) {
         executeSync(newRequest(endpoint("/calendar") + "?month=" + month).get().build())
     }
 
-    suspend fun history(days: Int, end: String? = null): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun history(days: Int, end: String?): JSONObject = withContext(Dispatchers.IO) {
         val url = endpoint("/history") + "?days=" + days +
             if (end.isNullOrBlank()) "" else "&end=" + end
         executeSync(newRequest(url).get().build())
@@ -262,19 +317,19 @@ class DietApi(private val settings: DietSettings) {
 
     // ------------------------------------------------------ 单条记录操作
 
-    suspend fun updateRecord(date: String, id: String, fields: Map<String, Any>): JSONObject =
+    override suspend fun updateRecord(date: String, id: String, fields: Map<String, Any>): JSONObject =
         withContext(Dispatchers.IO) {
             val body = JSONObject().put("date", date).put("id", id)
             fields.forEach { (k, v) -> body.put(k, v) }
             executeSync(newRequest(endpoint("/record/update")).post(jsonBody(body)).build())
         }
 
-    suspend fun deleteRecord(date: String, id: String): JSONObject = withContext(Dispatchers.IO) {
+    override suspend fun deleteRecord(date: String, id: String): JSONObject = withContext(Dispatchers.IO) {
         val body = JSONObject().put("date", date).put("id", id)
         executeSync(newRequest(endpoint("/record/delete")).post(jsonBody(body)).build())
     }
 
-    suspend fun reanalyzeRecord(date: String, id: String, instruction: String): JSONObject =
+    override suspend fun reanalyzeRecord(date: String, id: String, instruction: String): JSONObject =
         withContext(Dispatchers.IO) {
             val body = JSONObject().put("date", date).put("id", id).put("instruction", instruction)
             executeSync(newRequest(endpoint("/record/reanalyze")).post(jsonBody(body)).build())
@@ -283,6 +338,9 @@ class DietApi(private val settings: DietSettings) {
     companion object {
         /** 内部标记：服务端不支持流式，调用方应回退到一次性接口。 */
         const val NO_STREAM = "__NO_STREAM__"
+
+        /** 本地图片缓存上限（张）。 */
+        private const val MAX_CACHED_PHOTOS = 200
 
         /** 把底层异常翻译成用户能照着排查的中文提示。 */
         fun friendlyMessage(e: Throwable): String {

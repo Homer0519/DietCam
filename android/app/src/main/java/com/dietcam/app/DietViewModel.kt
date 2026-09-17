@@ -47,6 +47,14 @@ sealed interface CaptureUiState {
     data class Failed(val message: String) : CaptureUiState
 }
 
+/** 日历里某一天的明细。 */
+data class DayRecords(
+    val date: String,
+    val records: List<MealRecord>,
+    val loading: Boolean = true,
+    val error: String? = null,
+)
+
 /** 中性提示弹窗（连接测试、说明等）。 */
 data class Notice(val title: String, val message: String)
 
@@ -74,42 +82,73 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun isConfigured(): Boolean = store.isConfigured()
 
-    fun saveSettings(baseUrl: String, apiKey: String, secret: String) {
-        store.baseUrl = baseUrl
-        store.apiKey = apiKey
-        store.secret = secret
+    fun saveSettings(settings: DietSettings) {
+        store.baseUrl = settings.baseUrl
+        store.apiKey = settings.apiKey
+        store.secret = settings.secret
+        store.localMode = settings.localMode
+        store.modelBaseUrl = settings.modelBaseUrl
+        store.modelApiKey = settings.modelApiKey
+        store.modelName = settings.modelName
         _configVersion.value = _configVersion.value + 1
         refreshHome()
+        refreshProfile()
     }
+
+    /** 归档照片的字节；远程模式下这里会命中本地磁盘缓存。 */
+    suspend fun photoBytes(date: String, name: String): ByteArray =
+        dietBackend(getApplication<Application>(), store.snapshot()).photoBytes(date, name)
+
+    /** 本地模式与服务器模式共用的「配置好了没」判断。 */
+    private fun notReadyMessage(): String =
+        if (store.snapshot().localMode) "请先在设置里填写模型接口地址与模型名称"
+        else "请先在设置里填写服务器地址与密钥"
 
     fun dismissNotice() {
         _notice.value = null
     }
 
-    fun testConnection() {
-        val current = store.snapshot()
+    fun testConnection(settings: DietSettings = store.snapshot()) {
+        val current = settings
         val missing = mutableListOf<String>()
-        if (current.baseUrl.isBlank()) missing.add("服务器地址")
-        if (current.apiKey.isBlank()) missing.add("AstrBot API Key")
-        if (current.secret.isBlank()) missing.add("签名密钥")
+        if (current.localMode) {
+            if (current.modelBaseUrl.isBlank()) missing.add("模型接口地址")
+            if (current.modelName.isBlank()) missing.add("模型名称")
+        } else {
+            if (current.baseUrl.isBlank()) missing.add("服务器地址")
+            if (current.apiKey.isBlank()) missing.add("AstrBot API Key")
+            if (current.secret.isBlank()) missing.add("签名密钥")
+        }
         if (missing.isNotEmpty()) {
             _notice.value = Notice("还差几项没填", "请先填写：" + missing.joinToString("、"))
             return
         }
         viewModelScope.launch {
             try {
-                val json = DietApi(current).health()
-                val features = json.optJSONObject("features")
-                val stream = features?.optBoolean("stream", false) ?: false
-                _notice.value = Notice(
-                    "连接成功 ✅",
-                    buildString {
-                        append("插件版本：").append(json.optString("version", "?"))
-                        append("\n流式分析：").append(if (stream) "已启用" else "未启用（将自动降级）")
-                        append("\n数据目录：").append(json.optString("data_dir", "?"))
-                        append("\n\n两把钥匙都对上了，可以开始记录。")
-                    },
-                )
+                val json = dietBackend(getApplication<Application>(), current).health()
+                _notice.value = if (current.localMode) {
+                    Notice(
+                        "本地模式已就绪 ✅",
+                        buildString {
+                            append("模型：").append(current.modelName)
+                            append("\n接口：").append(current.modelBaseUrl)
+                            append("\n数据目录：").append(json.optString("data_dir", "?"))
+                            append("\n\n不需要 AstrBot —— 照片和分析结果都存在这台手机上。")
+                        },
+                    )
+                } else {
+                    val features = json.optJSONObject("features")
+                    val stream = features?.optBoolean("stream", false) ?: false
+                    Notice(
+                        "连接成功 ✅",
+                        buildString {
+                            append("插件版本：").append(json.optString("version", "?"))
+                            append("\n流式分析：").append(if (stream) "已启用" else "未启用（将自动降级）")
+                            append("\n数据目录：").append(json.optString("data_dir", "?"))
+                            append("\n\n两把钥匙都对上了，可以开始记录。")
+                        },
+                    )
+                }
             } catch (e: Exception) {
                 _notice.value = Notice("连接失败", DietApi.friendlyMessage(e))
             }
@@ -120,14 +159,14 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshHome() {
         val current = store.snapshot()
-        if (current.baseUrl.isBlank() || current.secret.isBlank()) {
-            _home.value = HomeUiState(loading = false, error = "还没有配置服务器")
+        if (!store.isConfigured()) {
+            _home.value = HomeUiState(loading = false, error = notReadyMessage())
             return
         }
         viewModelScope.launch {
             _home.value = _home.value.copy(refreshing = _home.value.summary != null, error = null)
             try {
-                val json = DietApi(current).summary()
+                val json = dietBackend(getApplication<Application>(), current).summary()
                 _home.value = HomeUiState(
                     loading = false,
                     refreshing = false,
@@ -145,10 +184,10 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveTargets(targets: Map<String, Double>) {
         val current = store.snapshot()
-        if (current.baseUrl.isBlank()) return
+        if (!store.isConfigured()) return
         viewModelScope.launch {
             try {
-                DietApi(current).updateTargets(targets)
+                dietBackend(getApplication<Application>(), current).updateTargets(targets)
                 refreshHome()
             } catch (e: Exception) {
                 _notice.value = Notice("保存目标失败", DietApi.friendlyMessage(e))
@@ -185,8 +224,8 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         val state = _capture.value
         if (state !is CaptureUiState.Reviewing) return
         val current = store.snapshot()
-        if (current.baseUrl.isBlank() || current.secret.isBlank()) {
-            _capture.value = CaptureUiState.Failed("请先在设置里填写服务器地址与密钥")
+        if (!store.isConfigured()) {
+            _capture.value = CaptureUiState.Failed(notReadyMessage())
             return
         }
         startAnalyze(state.file, note) { api, onDelta ->
@@ -199,8 +238,8 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         val desc = text.trim()
         if (desc.isEmpty()) return
         val current = store.snapshot()
-        if (current.baseUrl.isBlank() || current.secret.isBlank()) {
-            _capture.value = CaptureUiState.Failed("请先在设置里填写服务器地址与密钥")
+        if (!store.isConfigured()) {
+            _capture.value = CaptureUiState.Failed(notReadyMessage())
             return
         }
         startAnalyze(null, desc) { api, onDelta ->
@@ -211,10 +250,10 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
     private fun startAnalyze(
         file: File?,
         note: String,
-        call: suspend (DietApi, (String) -> Unit) -> org.json.JSONObject,
+        call: suspend (DietBackend, (String) -> Unit) -> org.json.JSONObject,
     ) {
         analyzeJob?.cancel()
-        val api = DietApi(store.snapshot())
+        val api = dietBackend(getApplication<Application>(), store.snapshot())
         val buffer = StringBuilder()
         _capture.value = CaptureUiState.Analyzing("")
         analyzeJob = viewModelScope.launch {
@@ -253,6 +292,37 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _capture.value = CaptureUiState.Live
     }
 
+    // ------------------------------------------------------- 日历某天明细
+
+    private val _dayRecords = MutableStateFlow<DayRecords?>(null)
+    val dayRecords: StateFlow<DayRecords?> = _dayRecords.asStateFlow()
+
+    /** 点开日历里的某一天，把当天吃了什么拉出来。 */
+    fun loadDay(date: String) {
+        _dayRecords.value = DayRecords(date, emptyList(), loading = true)
+        viewModelScope.launch {
+            try {
+                val json = dietBackend(getApplication(), store.snapshot()).records(date)
+                _dayRecords.value = DayRecords(
+                    date = date,
+                    records = JsonParse.summary(json).records,
+                    loading = false,
+                )
+            } catch (e: Exception) {
+                _dayRecords.value = DayRecords(
+                    date = date,
+                    records = emptyList(),
+                    loading = false,
+                    error = DietApi.friendlyMessage(e),
+                )
+            }
+        }
+    }
+
+    fun closeDay() {
+        _dayRecords.value = null
+    }
+
     // ------------------------------------------------- 档案 / 日历 / 历史
 
     private val _profile = MutableStateFlow<ProfileInfo?>(null)
@@ -271,7 +341,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         val current = store.snapshot()
         if (current.baseUrl.isBlank() || current.secret.isBlank()) return
         viewModelScope.launch {
-            runCatching { DietApi(current).profile() }
+            runCatching { dietBackend(getApplication<Application>(), current).profile() }
                 .onSuccess { _profile.value = ProfileParse.info(it) }
                 .onFailure { _notice.value = Notice("读取档案失败", DietApi.friendlyMessage(it)) }
         }
@@ -283,7 +353,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _busy.value = true
         viewModelScope.launch {
             try {
-                val json = DietApi(current).saveProfile(
+                val json = dietBackend(getApplication<Application>(), current).saveProfile(
                     mapOf(
                         "height_cm" to profile.heightCm,
                         "weight_kg" to profile.weightKg,
@@ -315,7 +385,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         val current = store.snapshot()
         if (current.baseUrl.isBlank() || current.secret.isBlank()) return
         viewModelScope.launch {
-            runCatching { DietApi(current).calendar(month) }
+            runCatching { dietBackend(getApplication<Application>(), current).calendar(month) }
                 .onSuccess { _calendar.value = ProfileParse.calendar(it) }
                 .onFailure { _notice.value = Notice("读取日历失败", DietApi.friendlyMessage(it)) }
         }
@@ -325,7 +395,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         val current = store.snapshot()
         if (current.baseUrl.isBlank() || current.secret.isBlank()) return
         viewModelScope.launch {
-            runCatching { DietApi(current).history(days) }
+            runCatching { dietBackend(getApplication<Application>(), current).history(days) }
                 .onSuccess { json ->
                     val list = mutableListOf<MealRecord>()
                     json.optJSONArray("records")?.let { arr ->
@@ -346,7 +416,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _busy.value = true
         viewModelScope.launch {
             try {
-                DietApi(current).updateRecord(date, record.id, fields)
+                dietBackend(getApplication<Application>(), current).updateRecord(date, record.id, fields)
                 afterRecordChange()
                 onDone()
             } catch (e: Exception) {
@@ -362,7 +432,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _busy.value = true
         viewModelScope.launch {
             try {
-                DietApi(current).deleteRecord(date, record.id)
+                dietBackend(getApplication<Application>(), current).deleteRecord(date, record.id)
                 afterRecordChange()
                 onDone()
             } catch (e: Exception) {
@@ -378,7 +448,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _busy.value = true
         viewModelScope.launch {
             try {
-                val resp = DietApi(current).reanalyzeRecord(date, record.id, instruction)
+                val resp = dietBackend(getApplication<Application>(), current).reanalyzeRecord(date, record.id, instruction)
                 val updated = resp.optJSONObject("record")?.let { JsonParse.record(it) }
                 afterRecordChange()
                 // 光说一句「已重新分析」用户看不出模型到底改了什么，这里把前后差别列出来

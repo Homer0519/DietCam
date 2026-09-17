@@ -165,7 +165,7 @@ private fun MemoryRow(record: MealRecord, vm: DietViewModel, onClick: () -> Unit
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             val bitmap = if (record.hasPhoto) {
                 rememberArchivedPhoto(
-                    apiProvider = { DietApi(vm.settings()) },
+                    loader = { d, n -> vm.photoBytes(d, n) },
                     date = record.date,
                     name = record.photo,
                 )

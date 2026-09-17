@@ -75,7 +75,7 @@ fun RecordDetailDialog(
 
     val bitmap = if (record.hasPhoto) {
         rememberArchivedPhoto(
-            apiProvider = { DietApi(vm.settings()) },
+            loader = { d, n -> vm.photoBytes(d, n) },
             date = record.date,
             name = record.photo,
             maxDim = 1024,
@@ -131,7 +131,10 @@ fun RecordDetailDialog(
                             }
                         }
                     }
-                    DetailBody(record)
+                    DetailBody(record) { meal ->
+                        // 餐次点一下就改，不用进「修改」弹窗再找输入框
+                        vm.updateRecord(record.date, record, mapOf("meal" to meal)) { onDismiss() }
+                    }
                 }
 
                 HairLine()
@@ -157,7 +160,7 @@ fun RecordDetailDialog(
 
 /** 弹窗里的数据部分。 */
 @Composable
-private fun DetailBody(record: MealRecord) {
+private fun DetailBody(record: MealRecord, onMealPick: (String) -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -189,6 +192,9 @@ private fun DetailBody(record: MealRecord) {
                 Tag("非食物", Palette.Warning)
             }
         }
+
+        Spacer(Modifier.height(14.dp))
+        MealPicker(record.meal, onMealPick)
 
         Spacer(Modifier.height(18.dp))
         Row(verticalAlignment = Alignment.Bottom) {
@@ -579,6 +585,48 @@ fun DeleteConfirmDialog(
             }
         },
     )
+}
+
+/** 餐次一键切换：模型偶尔会把早饭认成加餐，点一下就改过来。 */
+@Composable
+private fun MealPicker(current: String, onPick: (String) -> Unit) {
+    Column {
+        Text("餐次", color = Palette.TextTertiary, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(7.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            MEAL_OPTIONS.forEach { meal ->
+                MealChip(meal, meal == current, Modifier.weight(1f)) {
+                    if (meal != current) onPick(meal)
+                }
+            }
+        }
+    }
+}
+
+private val MEAL_OPTIONS = listOf("早餐", "午餐", "晚餐", "加餐")
+
+@Composable
+private fun MealChip(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(Radii.sm))
+            .background(if (selected) Palette.Accent.copy(alpha = 0.18f) else Palette.SurfaceHigh)
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = if (selected) Palette.Accent else Palette.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        )
+    }
 }
 
 @Composable

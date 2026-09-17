@@ -43,7 +43,8 @@ object PhotoCache {
 /** 异步加载一张归档照片，返回可用的 Bitmap。 */
 @Composable
 fun rememberArchivedPhoto(
-    apiProvider: () -> DietApi,
+    /** 取归档照片的字节。远程模式下 DietApi 内部还有一层磁盘缓存，同一张只下一次。 */
+    loader: suspend (String, String) -> ByteArray,
     date: String,
     name: String,
     maxDim: Int = 512,
@@ -55,7 +56,7 @@ fun rememberArchivedPhoto(
         if (bitmap != null || name.isBlank() || date.isBlank()) return@LaunchedEffect
         val loaded = withContext(Dispatchers.IO) {
             runCatching {
-                val bytes = apiProvider().photoBytes(date, name)
+                val bytes = loader(date, name)
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                 var sample = 1

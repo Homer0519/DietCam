@@ -16,6 +16,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,6 +60,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -168,11 +170,11 @@ private fun DietCamApp(vm: DietViewModel) {
         SettingsDialog(
             current = vm.settings(),
             onDismiss = { showSettings = false },
-            onSave = { baseUrl, apiKey, secret ->
-                vm.saveSettings(baseUrl, apiKey, secret)
+            onSave = { settings ->
+                vm.saveSettings(settings)
                 showSettings = false
             },
-            onTest = { vm.testConnection() },
+            onTest = { settings -> vm.testConnection(settings) },
         )
     }
 
@@ -230,12 +232,26 @@ private fun BottomNav(current: Tab, onSelect: (Tab) -> Unit) {
 private fun SettingsDialog(
     current: DietSettings,
     onDismiss: () -> Unit,
-    onSave: (String, String, String) -> Unit,
-    onTest: () -> Unit,
+    onSave: (DietSettings) -> Unit,
+    onTest: (DietSettings) -> Unit,
 ) {
+    var local by remember { mutableStateOf(current.localMode) }
     var baseUrl by remember { mutableStateOf(current.baseUrl) }
     var apiKey by remember { mutableStateOf(current.apiKey) }
     var secret by remember { mutableStateOf(current.secret) }
+    var modelBase by remember { mutableStateOf(current.modelBaseUrl) }
+    var modelKey by remember { mutableStateOf(current.modelApiKey) }
+    var modelName by remember { mutableStateOf(current.modelName) }
+
+    fun collected() = DietSettings(
+        baseUrl = baseUrl,
+        apiKey = apiKey,
+        secret = secret,
+        localMode = local,
+        modelBaseUrl = modelBase,
+        modelApiKey = modelKey,
+        modelName = modelName,
+    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -243,40 +259,54 @@ private fun SettingsDialog(
         text = {
             Column(
                 Modifier
-                    .heightIn(max = 460.dp)
+                    .heightIn(max = 470.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
-                Field(baseUrl, { baseUrl = it }, "AstrBot 地址", "http://1.2.3.4:6185")
-                Spacer(Modifier.height(10.dp))
-                Field(apiKey, { apiKey = it }, "AstrBot API Key", "abk_...")
-                Spacer(Modifier.height(10.dp))
-                Field(secret, { secret = it }, "签名密钥 (hmac_secret)", "与插件配置一致")
+                ModeChooser(local) { local = it }
                 Spacer(Modifier.height(14.dp))
-                Surface(
-                    color = Palette.SurfaceHigh,
-                    shape = RoundedCornerShape(Radii.sm),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
+
+                if (local) {
+                    Field(modelBase, { modelBase = it }, "模型接口地址", "https://api.example.com/v1")
+                    Spacer(Modifier.height(10.dp))
+                    Field(modelKey, { modelKey = it }, "模型 API Key", "sk-...")
+                    Spacer(Modifier.height(10.dp))
+                    Field(modelName, { modelName = it }, "模型名称", "qwen2.5-vl-7b-instruct")
+                    Spacer(Modifier.height(12.dp))
+                    HintBox(
+                        "本地模式：不需要 AstrBot。\n" +
+                            "分析直接调用上面这个 OpenAI 兼容的视觉模型，\n" +
+                            "照片与记录都留在这台手机上（换手机看不到）。\n\n" +
+                            "· 地址写到 /v1 就行，程序会自动补 /chat/completions\n" +
+                            "· 模型必须能看图：qwen2.5-vl / gpt-4o / glm-4v 等\n" +
+                            "· 数据在 App 私有目录，卸载即清空，注意备份",
+                    )
+                } else {
+                    Field(baseUrl, { baseUrl = it }, "AstrBot 地址", "http://1.2.3.4:6185")
+                    Spacer(Modifier.height(10.dp))
+                    Field(apiKey, { apiKey = it }, "AstrBot API Key", "abk_...")
+                    Spacer(Modifier.height(10.dp))
+                    Field(secret, { secret = it }, "签名密钥 (hmac_secret)", "与插件配置一致")
+                    Spacer(Modifier.height(12.dp))
+                    HintBox(
                         "① AstrBot API Key：AstrBot 自己的钥匙，在网页端\n" +
                             "   设置 → API Key 新建，权限勾 plugin，形如 abk_xxx\n" +
                             "   ⚠️ 不是 OpenAI / 模型的 key\n\n" +
                             "② 签名密钥：与插件配置里的 hmac_secret 填一样的随机串\n\n" +
                             "一个是「能不能进 AstrBot 的门」，\n" +
-                            "一个是「插件认不认你」。",
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                        color = Palette.TextSecondary,
-                        modifier = Modifier.padding(12.dp),
+                            "一个是「插件认不认你」。\n\n" +
+                            "照片与记录都存在 AstrBot 那边，手机只保留一份缓存。",
                     )
                 }
+
                 Spacer(Modifier.height(12.dp))
-                TextButton(onClick = onTest) { Text("测试连接", color = Palette.Accent) }
+                TextButton(onClick = { onTest(collected()) }) {
+                    Text("测试连接", color = Palette.Accent)
+                }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onSave(baseUrl, apiKey, secret) },
+                onClick = { onSave(collected()) },
                 shape = RoundedCornerShape(Radii.sm),
                 colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
             ) {
@@ -287,6 +317,68 @@ private fun SettingsDialog(
             TextButton(onClick = onDismiss) { Text("取消", color = Palette.TextSecondary) }
         },
     )
+}
+
+/** 两种模式二选一。 */
+@Composable
+private fun ModeChooser(local: Boolean, onChange: (Boolean) -> Unit) {
+    Column {
+        Text("运行方式", color = Palette.TextSecondary, fontSize = 12.sp)
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(Radii.sm))
+                .background(Palette.SurfaceHigh)
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            ModeChip("连 AstrBot", !local, Modifier.weight(1f)) { onChange(false) }
+            ModeChip("本地模式", local, Modifier.weight(1f)) { onChange(true) }
+        }
+    }
+}
+
+@Composable
+private fun ModeChip(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(Radii.sm))
+            .background(if (selected) Palette.Accent else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = if (selected) Palette.OnAccent else Palette.TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        )
+    }
+}
+
+/** 灰色说明块。 */
+@Composable
+private fun HintBox(text: String) {
+    Surface(
+        color = Palette.SurfaceHigh,
+        shape = RoundedCornerShape(Radii.sm),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+            color = Palette.TextSecondary,
+            modifier = Modifier.padding(12.dp),
+        )
+    }
 }
 
 @Composable

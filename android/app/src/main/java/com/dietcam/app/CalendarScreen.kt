@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
@@ -55,8 +57,15 @@ fun CalendarScreen(vm: DietViewModel) {
     val month by vm.calendar.collectAsStateWithLifecycle()
     var current by remember { mutableStateOf(YearMonth.now()) }
     var selectedDay by remember { mutableStateOf<String?>(null) }
+    var pickTarget by remember { mutableStateOf<MealRecord?>(null) }
+    var editing by remember { mutableStateOf<MealRecord?>(null) }
+    var reanalyzing by remember { mutableStateOf<MealRecord?>(null) }
+    var deleting by remember { mutableStateOf<MealRecord?>(null) }
+    val dayDetail by vm.dayRecords.collectAsStateWithLifecycle()
+    val busy by vm.busy.collectAsStateWithLifecycle()
 
     LaunchedEffect(current) { vm.refreshCalendar(current.toString()) }
+    LaunchedEffect(selectedDay) { selectedDay?.let { vm.loadDay(it) } }
 
     Box(Modifier.fillMaxSize().background(Palette.Background)) {
         LazyColumn(
@@ -76,13 +85,56 @@ fun CalendarScreen(vm: DietViewModel) {
         }
     }
 
-    selectedDay?.let { day ->
-        val records = month?.days?.get(day)
+    val detail = dayDetail
+    // 打开某一条的详情时先把当天列表收起来，避免两层弹窗叠在一起
+    if (detail != null && pickTarget == null) {
         DayDetailDialog(
-            day = day,
-            records = emptyList(),
-            summary = records,
-            onDismiss = { selectedDay = null },
+            detail = detail,
+            onPickRecord = { pickTarget = it },
+            onDismiss = {
+                selectedDay = null
+                vm.closeDay()
+            },
+        )
+    }
+
+    pickTarget?.let { record ->
+        RecordDetailDialog(
+            record = record,
+            vm = vm,
+            onDismiss = { pickTarget = null },
+            onEdit = { editing = record; pickTarget = null },
+            onReanalyze = { reanalyzing = record; pickTarget = null },
+            onDelete = { deleting = record; pickTarget = null },
+        )
+    }
+
+    editing?.let { record ->
+        RecordEditDialog(
+            record = record,
+            running = busy,
+            onDismiss = { editing = null },
+            onSave = { fields -> vm.updateRecord(record.date, record, fields) { editing = null } },
+        )
+    }
+
+    reanalyzing?.let { record ->
+        ReanalyzeDialog(
+            record = record,
+            running = busy,
+            onDismiss = { reanalyzing = null },
+            onRun = { instruction ->
+                vm.reanalyzeRecord(record.date, record, instruction) { reanalyzing = null }
+            },
+        )
+    }
+
+    deleting?.let { record ->
+        DeleteConfirmDialog(
+            record = record,
+            running = busy,
+            onDismiss = { deleting = null },
+            onConfirm = { vm.deleteRecord(record.date, record) { deleting = null } },
         )
     }
 }
@@ -274,32 +326,144 @@ private fun Legend(color: Color, text: String) {
     }
 }
 
-/** 点某一天后弹出的当日明细（只显示合计，明细请回主页或回忆页）。 */
+/** 点某一天后弹出的当日明细：这天吃了什么，点一条还能继续改。 */
 @Composable
 private fun DayDetailDialog(
-    day: String,
-    records: List<MealRecord>,
-    summary: DayTotals?,
+    detail: DayRecords,
+    onPickRecord: (MealRecord) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val foods = detail.records.filter { it.isFood }
+    val kcal = foods.sumOf { it.nutrition.kcal }
+    val protein = foods.sumOf { it.nutrition.protein }
+    val carbs = foods.sumOf { it.nutrition.carbs }
+    val fat = foods.sumOf { it.nutrition.fat }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(day, fontWeight = FontWeight.SemiBold) },
+        title = {
+            Column {
+                Text(
+                    detail.date + "　" + weekdayLabel(detail.date),
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                )
+                if (!detail.loading && detail.error == null && detail.records.isNotEmpty()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        detail.records.size.toString() + " 餐 · " + kcal.roundToInt() + " 千卡",
+                        color = Palette.TextTertiary,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+        },
         text = {
-            Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
-                if (summary == null) {
-                    Text("这天没有记录", color = Palette.TextSecondary, fontSize = 13.sp)
-                } else {
-                    StatLine("餐数", summary.count.toString() + " 餐")
-                    StatLine("热量", summary.nutrition.kcal.roundToInt().toString() + " 千卡")
-                    StatLine("蛋白质", summary.nutrition.protein.roundToInt().toString() + " g")
-                    StatLine("碳水", summary.nutrition.carbs.roundToInt().toString() + " g")
-                    StatLine("脂肪", summary.nutrition.fat.roundToInt().toString() + " g")
+            Column(
+                Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                when {
+                    detail.loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Palette.Accent,
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("正在读取…", color = Palette.TextSecondary, fontSize = 13.sp)
+                    }
+
+                    detail.error != null -> Text(
+                        "读取失败：" + detail.error,
+                        color = Palette.Danger,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                    )
+
+                    detail.records.isEmpty() -> Text(
+                        "这天没有记录。",
+                        color = Palette.TextSecondary,
+                        fontSize = 13.sp,
+                    )
+
+                    else -> {
+                        detail.records.forEach { record ->
+                            DayRecordRow(record) { onPickRecord(record) }
+                            Spacer(Modifier.height(8.dp))
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        HairLine()
+                        Spacer(Modifier.height(10.dp))
+                        StatLine("合计", kcal.roundToInt().toString() + " 千卡")
+                        StatLine("蛋白质", protein.roundToInt().toString() + " g")
+                        StatLine("碳水", carbs.roundToInt().toString() + " g")
+                        StatLine("脂肪", fat.roundToInt().toString() + " g")
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "点任意一条可以看详情、改内容或让模型重新分析。",
+                            color = Palette.TextTertiary,
+                            fontSize = 11.sp,
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("知道了", color = Palette.Accent) }
+            TextButton(onClick = onDismiss) { Text("关闭", color = Palette.Accent) }
         },
     )
 }
+
+@Composable
+private fun DayRecordRow(record: MealRecord, onClick: () -> Unit) {
+    Surface(
+        color = Palette.SurfaceHigh,
+        shape = RoundedCornerShape(Radii.sm),
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick,
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (record.isFood) (if (record.fromText) "✍️" else "📷") else "❔",
+                fontSize = 16.sp,
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(record.time, color = Palette.TextTertiary, fontSize = 11.sp)
+                    Spacer(Modifier.width(6.dp))
+                    Text(record.meal, color = Palette.Accent, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                }
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    record.title,
+                    color = Palette.TextPrimary,
+                    fontSize = 13.5.sp,
+                    maxLines = 2,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (record.isFood) record.nutrition.kcal.roundToInt().toString() else "—",
+                color = Palette.TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+/** 2026-09-15 -> 周二 */
+private fun weekdayLabel(date: String): String = runCatching {
+    when (LocalDate.parse(date).dayOfWeek.value) {
+        1 -> "周一"
+        2 -> "周二"
+        3 -> "周三"
+        4 -> "周四"
+        5 -> "周五"
+        6 -> "周六"
+        else -> "周日"
+    }
+}.getOrDefault("")

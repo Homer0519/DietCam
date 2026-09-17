@@ -960,6 +960,26 @@ check("days 传了非数字也能兜住", "鸡翅" in weird or "没有找到" in
 status_text = cmd_text("/饮食状态", "cmd_diet_status")
 check("状态里报出 LLM 工具数量", "LLM 工具" in status_text and "3 个" in status_text, status_text)
 
+# ================================================================ 24. 餐次
+section("24. 餐次判断（把当前时间告诉模型）")
+
+hint = plugin._time_hint()
+check("时间提示里有「当前时间」", "当前时间" in hint, hint)
+check("时间提示里点明了 meal 怎么判", "请据此判断 meal" in hint, hint)
+check("时间提示给出了各餐时段", "早餐 05:00-10:00" in hint and "晚餐 17:00-21:00" in hint, hint)
+check("时间提示带星期", "周" in hint, hint)
+check("时间提示以空行开头，接在提示词后面不会粘在一起", hint.startswith("\n\n"), repr(hint[:6]))
+
+# 真正发给模型的提示词里必须带上它 —— 之前餐次老出错就是因为模型不知道现在几点
+patch_analyzer()
+make_request(files={"file": upload("meal-time.jpg")})
+resp = call("/analyze")
+check("拍照分析成功", resp.status_code == 200, resp.payload)
+sent = str(ANALYZED.get("prompt") or "")
+check("发给模型的提示词里带上了当前时间", "当前时间：" in sent, sent[-200:])
+check("提示词里保留了原来的 JSON 格式要求", "is_food" in sent and "calories_kcal" in sent)
+check("提示词说明「用户说了以用户为准」", "以用户说的为准" in sent, sent[-200:])
+
 # ================================================================ 结果
 print()
 print("=" * 56)
