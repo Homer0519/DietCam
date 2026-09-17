@@ -1,30 +1,7 @@
-# Android / Gradle
-android/.gradle/
-android/build/
-android/app/build/
-android/local.properties
-# 签名口令不该进版本库。密钥库本身要留着（覆盖升级靠它），口令请配合
-# GitHub Secret / 本机文件使用；详见 README「签名与升级」。
-# 注意：该文件目前仍在版本库里，需要时用下面这行停跟踪（会同时从别人机器上删掉）：
-#   git rm --cached android/keystore.properties
-android/keystore.properties
-android/.idea/
-*.iml
-*.apk
-*.aab
-captures/
+# 本仓库是「AstrBot 插件开发」用的多项目仓库，每个项目一个子目录。
+# 下面的规则按项目分组，新增项目时照抄一段即可。
 
-# 本机构建工具链（体积很大，不要提交）
-.toolchain/
-
-# 打包产物（由工具脚本生成，不入库）
-dist/*.zip
-dist/*.bundle
-
-# 测试/演示临时数据
-.demo_data/
-.selftest_data/
-.ziptest/
+# ---------------------------------------------------------------- 通用
 
 # Python
 __pycache__/
@@ -32,6 +9,36 @@ __pycache__/
 .venv/
 venv/
 
-# 编辑器
+# 编辑器 / 系统
 .vscode/
+.idea/
 .DS_Store
+*.iml
+
+# Android 构建产物（任何项目通用）
+*.apk
+*.aab
+captures/
+
+# ---------------------------------------------------------------- DietCam
+
+dietcam/android/.gradle/
+dietcam/android/build/
+dietcam/android/app/build/
+dietcam/android/local.properties
+
+# 本机构建工具链（Android SDK + Gradle，约 1.9 GB，不要提交）
+dietcam/.toolchain/
+
+# 打包产物（由 tools/package_plugin.py 生成，不入库）
+dietcam/dist/*.zip
+dietcam/dist/*.bundle
+
+# 测试 / 演示临时数据
+dietcam/.demo_data/
+dietcam/.selftest_data/
+dietcam/.ziptest/
+
+# 签名口令不该进版本库（密钥库 .jks 本身要留着 —— 覆盖升级靠它）：
+#   git rm --cached dietcam/android/keystore.properties
+dietcam/android/keystore.properties
