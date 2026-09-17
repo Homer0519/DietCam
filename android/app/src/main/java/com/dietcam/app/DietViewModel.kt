@@ -47,6 +47,13 @@ sealed interface CaptureUiState {
     data class Failed(val message: String) : CaptureUiState
 }
 
+/** 拉取模型列表的结果。 */
+data class ModelPickState(
+    val loading: Boolean = false,
+    val options: List<String> = emptyList(),
+    val error: String? = null,
+)
+
 /** 日历里某一天的明细。 */
 data class DayRecords(
     val date: String,
@@ -93,6 +100,32 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _configVersion.value = _configVersion.value + 1
         refreshHome()
         refreshProfile()
+    }
+
+    // ---------------------------------------------------- 本地模式：模型列表
+
+    private val _models = MutableStateFlow<ModelPickState?>(null)
+    val models: StateFlow<ModelPickState?> = _models.asStateFlow()
+
+    /** 拉取模型接口支持的模型名，省得手打拼错。 */
+    fun fetchModels(settings: DietSettings) {
+        _models.value = ModelPickState(loading = true)
+        viewModelScope.launch {
+            try {
+                val list = LocalDietApi.listModels(settings)
+                _models.value = if (list.isEmpty()) {
+                    ModelPickState(loading = false, error = "接口没有返回任何模型，请手动填写")
+                } else {
+                    ModelPickState(loading = false, options = list)
+                }
+            } catch (e: Exception) {
+                _models.value = ModelPickState(loading = false, error = DietApi.friendlyMessage(e))
+            }
+        }
+    }
+
+    fun closeModels() {
+        _models.value = null
     }
 
     /** 归档照片的字节；远程模式下这里会命中本地磁盘缓存。 */

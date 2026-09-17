@@ -33,16 +33,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -97,6 +100,7 @@ private fun DietCamApp(vm: DietViewModel) {
     var showCamera by rememberSaveable { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     val notice by vm.notice.collectAsStateWithLifecycle()
+    val models by vm.models.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         if (!vm.isConfigured()) showSettings = true
@@ -169,6 +173,9 @@ private fun DietCamApp(vm: DietViewModel) {
     if (showSettings) {
         SettingsDialog(
             current = vm.settings(),
+            models = models,
+            onFetchModels = { vm.fetchModels(it) },
+            onCloseModels = { vm.closeModels() },
             onDismiss = { showSettings = false },
             onSave = { settings ->
                 vm.saveSettings(settings)
@@ -234,6 +241,9 @@ private fun SettingsDialog(
     onDismiss: () -> Unit,
     onSave: (DietSettings) -> Unit,
     onTest: (DietSettings) -> Unit,
+    models: ModelPickState?,
+    onFetchModels: (DietSettings) -> Unit,
+    onCloseModels: () -> Unit,
 ) {
     var local by remember { mutableStateOf(current.localMode) }
     var baseUrl by remember { mutableStateOf(current.baseUrl) }
@@ -271,7 +281,43 @@ private fun SettingsDialog(
                     Field(modelKey, { modelKey = it }, "模型 API Key", "sk-...")
                     Spacer(Modifier.height(10.dp))
                     Field(modelName, { modelName = it }, "模型名称", "qwen2.5-vl-7b-instruct")
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = { onFetchModels(collected()) },
+                            enabled = !(models?.loading ?: false),
+                        ) {
+                            if (models?.loading == true) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    color = Palette.Accent,
+                                    strokeWidth = 2.dp,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Text(
+                                if (models?.loading == true) "拉取中…" else "拉取模型列表",
+                                color = if (models?.loading == true) Palette.TextTertiary else Palette.Accent,
+                                fontSize = 13.sp,
+                            )
+                        }
+                        if (models != null && !models.loading && models.options.isNotEmpty()) {
+                            Text(
+                                "已拉取 " + models.options.size + " 个",
+                                color = Palette.TextTertiary,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                    models?.error?.let { message ->
+                        Text(message, color = Palette.Danger, fontSize = 12.sp, lineHeight = 17.sp)
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    TextButton(onClick = { onTest(collected()) }) {
+                        Text("测试连接", color = Palette.Accent)
+                    }
+                    Spacer(Modifier.height(8.dp))
                     HintBox(
                         "本地模式：不需要 AstrBot。\n" +
                             "分析直接调用上面这个 OpenAI 兼容的视觉模型，\n" +
@@ -286,7 +332,11 @@ private fun SettingsDialog(
                     Field(apiKey, { apiKey = it }, "AstrBot API Key", "abk_...")
                     Spacer(Modifier.height(10.dp))
                     Field(secret, { secret = it }, "签名密钥 (hmac_secret)", "与插件配置一致")
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(6.dp))
+                    TextButton(onClick = { onTest(collected()) }) {
+                        Text("测试连接", color = Palette.Accent)
+                    }
+                    Spacer(Modifier.height(8.dp))
                     HintBox(
                         "① AstrBot API Key：AstrBot 自己的钥匙，在网页端\n" +
                             "   设置 → API Key 新建，权限勾 plugin，形如 abk_xxx\n" +
@@ -296,11 +346,6 @@ private fun SettingsDialog(
                             "一个是「插件认不认你」。\n\n" +
                             "照片与记录都存在 AstrBot 那边，手机只保留一份缓存。",
                     )
-                }
-
-                Spacer(Modifier.height(12.dp))
-                TextButton(onClick = { onTest(collected()) }) {
-                    Text("测试连接", color = Palette.Accent)
                 }
             }
         },
@@ -314,6 +359,107 @@ private fun SettingsDialog(
             }
         },
         dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消", color = Palette.TextSecondary) }
+        },
+    )
+
+    // 拉取成功后弹一个列表让用户挑，省得手打模型名
+    val picked = models
+    if (picked != null && !picked.loading && picked.options.isNotEmpty()) {
+        ModelPickerDialog(
+            options = picked.options,
+            current = modelName,
+            onPick = {
+                modelName = it
+                onCloseModels()
+            },
+            onDismiss = onCloseModels,
+        )
+    }
+}
+
+/** 拉取到的模型列表，点一个填进「模型名称」。 */
+@Composable
+private fun ModelPickerDialog(
+    options: List<String>,
+    current: String,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var keyword by remember { mutableStateOf("") }
+    val shown = remember(options, keyword) {
+        val key = keyword.trim()
+        if (key.isEmpty()) options else options.filter { it.contains(key, ignoreCase = true) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column {
+                Text("选择模型", fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "共 " + options.size + " 个，当前：" + current.ifBlank { "未选" },
+                    color = Palette.TextTertiary,
+                    fontSize = 11.sp,
+                )
+            }
+        },
+        text = {
+            Column(Modifier.heightIn(max = 400.dp)) {
+                OutlinedTextField(
+                    value = keyword,
+                    onValueChange = { keyword = it },
+                    label = { Text("搜索", fontSize = 12.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(Radii.sm),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Palette.Accent,
+                        unfocusedBorderColor = Palette.Outline,
+                        cursorColor = Palette.Accent,
+                    ),
+                )
+                Spacer(Modifier.height(8.dp))
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    if (shown.isEmpty()) {
+                        Text("没有匹配的模型", color = Palette.TextSecondary, fontSize = 13.sp)
+                    } else {
+                        shown.forEach { name ->
+                            val selected = name == current
+                            Surface(
+                                color = if (selected) Palette.AccentDim else Color.Transparent,
+                                shape = RoundedCornerShape(Radii.sm),
+                                modifier = Modifier.fillMaxWidth(),
+                                onClick = { onPick(name) },
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 11.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        name,
+                                        color = if (selected) Palette.TextPrimary else Palette.TextSecondary,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (selected) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            contentDescription = null,
+                                            tint = Palette.Accent,
+                                            modifier = Modifier.size(16.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
             TextButton(onClick = onDismiss) { Text("取消", color = Palette.TextSecondary) }
         },
     )

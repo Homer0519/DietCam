@@ -630,6 +630,58 @@ class LocalDietApi(
     private fun round1(value: Double): Double = Math.round(value * 10.0) / 10.0
 
     companion object {
+        /**
+         * 拉取 OpenAI 兼容接口支持的模型列表（GET /models）。
+         *
+         * 顺手兼容两种返回格式：标准 OpenAI 的 {"data":[{"id":...}]}，
+         * 以及 Ollama 那种 {"models":[{"name":...}]}。
+         */
+        suspend fun listModels(settings: DietSettings): List<String> = withContext(Dispatchers.IO) {
+            val base = settings.modelBaseUrl.trim().trimEnd('/')
+            if (base.isBlank()) throw DietApiException("请先填写模型接口地址")
+            val url = if (base.endsWith("/models")) base else base + "/models"
+
+            val request = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer " + settings.modelApiKey.trim())
+                .get()
+                .build()
+
+            val client = OkHttpClient.Builder()
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                val body = runCatching { response.body?.string() }.getOrNull() ?: ""
+                if (!response.isSuccessful) {
+                    throw DietApiException(
+                        "拉取模型列表失败 HTTP " + response.code + "：" + body.take(200),
+                    )
+                }
+                val obj = runCatching { JSONObject(body) }.getOrNull()
+                    ?: throw DietApiException("模型列表不是合法的 JSON")
+
+                val out = LinkedHashSet<String>()
+                obj.optJSONArray("data")?.let { array ->
+                    for (i in 0 until array.length()) {
+                        val id = array.optJSONObject(i)?.optString("id", "") ?: ""
+                        if (id.isNotBlank()) out.add(id)
+                    }
+                }
+                if (out.isEmpty()) {
+                    obj.optJSONArray("models")?.let { array ->
+                        for (i in 0 until array.length()) {
+                            val item = array.optJSONObject(i)
+                            val id = item?.optString("name", "")?.ifBlank { item.optString("model", "") } ?: ""
+                            if (id.isNotBlank()) out.add(id)
+                        }
+                    }
+                }
+                out.sorted()
+            }
+        }
+
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         private const val FENCE = "\u0060\u0060\u0060"
 

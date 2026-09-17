@@ -23,6 +23,7 @@
 直接调用你自己填的 OpenAI 兼容视觉模型接口，完全不经过 AstrBot：
 
 - 接口地址写到 `/v1` 即可，程序自动补 `/chat/completions`
+- 模型名称可以点「拉取模型列表」直接从接口 `GET /models` 拉下来挑，不用手打
 - 模型必须能看图（qwen2.5-vl / gpt-4o / glm-4v 等）
 - 记录在 App 私有目录的 `diet/records/<日期>.jsonl`，照片在 `diet/photos/<日期>/`
 - 数据不离开手机，卸载即清空，注意自行备份
