@@ -770,9 +770,40 @@ check("记录按时间倒序", all(
     for i in range(len(resp.payload["records"]) - 1)
 ))
 
+# days 必须真的生效。这条以前只断言 <= 365，于是「参数被 TypeError 吞掉、
+# 恒定回落 30 天」这个 bug 能和一整套全绿测试同时存在 —— 测试替实现圆了谎。
+for asked, expected in ((7, 7), (1, 1), (90, 90), (365, 365), (0, 1), (-5, 1)):
+    make_request(query={"days": asked})
+    resp = call("/history")
+    check(
+        "days=%s 真正生效（应回 %s）" % (asked, expected),
+        resp.status_code == 200 and resp.payload["days"] == expected,
+        resp.payload.get("days"),
+    )
+
 make_request(query={"days": 99999})
 resp = call("/history")
-check("过大的 days 被夹到上限", resp.status_code == 200 and resp.payload["days"] <= 365, resp.payload.get("days"))
+check(
+    "过大的 days 被夹到上限 365",
+    resp.status_code == 200 and resp.payload["days"] == 365,
+    resp.payload.get("days"),
+)
+
+make_request(query={"days": "abc"})
+resp = call("/history")
+check(
+    "非数字 days 回落 30 而不是 500",
+    resp.status_code == 200 and resp.payload["days"] == 30,
+    resp.payload.get("days"),
+)
+
+make_request(query={})
+resp = call("/history")
+check(
+    "不传 days 时默认为 30",
+    resp.status_code == 200 and resp.payload["days"] == 30,
+    resp.payload.get("days"),
+)
 
 make_request(query={"days": 7, "end": "坏日期"})
 resp = call("/history")
@@ -979,6 +1010,39 @@ sent = str(ANALYZED.get("prompt") or "")
 check("发给模型的提示词里带上了当前时间", "当前时间：" in sent, sent[-200:])
 check("提示词里保留了原来的 JSON 格式要求", "is_food" in sent and "calories_kcal" in sent)
 check("提示词说明「用户说了以用户为准」", "以用户说的为准" in sent, sent[-200:])
+
+# ================================================================ 25. 图片 MIME 与原子写
+section("25. data URL 的 MIME 与记录原子写")
+
+# 白名单收了 webp/heic，MIME 表以前却只有 png/jpeg —— 那两种会被贴错标签发出去
+check("png 映射为 image/png", module._image_mime(Path("a.PNG")) == "image/png")
+check("jpg 映射为 image/jpeg", module._image_mime(Path("a.jpg")) == "image/jpeg")
+check("jpeg 映射为 image/jpeg", module._image_mime(Path("a.jpeg")) == "image/jpeg")
+check("webp 映射为 image/webp", module._image_mime(Path("a.webp")) == "image/webp")
+check("heic 映射为 image/heic", module._image_mime(Path("a.heic")) == "image/heic")
+check("未知后缀回落到 image/jpeg", module._image_mime(Path("a.bmp")) == "image/jpeg")
+
+webp_file = TMP / "mime-probe.webp"
+webp_file.write_bytes(b"RIFF0000WEBPVP8 ")
+_base, payload, _headers, _timeout, _model = plugin._openai_request(webp_file, "看看这是什么")
+data_url = payload["messages"][0]["content"][1]["image_url"]["url"]
+check(
+    "webp 图上行的 data URL 用的是 image/webp（不是 image/jpeg）",
+    data_url.startswith("data:image/webp;base64,"),
+    data_url[:40],
+)
+
+# 原子写：先写 .tmp 再 replace，中途挂掉不会把当天记录截断成半截
+before = plugin._load_records(edit_day)
+plugin._rewrite_records(edit_day, before)
+check("重写后记录条数不变", len(plugin._load_records(edit_day)) == len(before))
+check("重写后不留 .tmp 残渣", list(plugin.record_dir.glob("*.tmp")) == [],
+      [p.name for p in plugin.record_dir.glob("*.tmp")])
+check("照片目录里也没有 .tmp 残渣", list(plugin.photo_dir.rglob("*.tmp")) == [])
+
+plugin._save_state(plugin._load_state())
+check("写 state.json 也走原子写，不留 .tmp",
+      not plugin._state_file().with_name(plugin._state_file().name + ".tmp").exists())
 
 # ================================================================ 结果
 print()

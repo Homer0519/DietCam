@@ -406,7 +406,7 @@ fun RecordEditDialog(
             ) {
                 EditField(title, { title = it }, "名称")
                 Spacer(Modifier.height(8.dp))
-                EditField(meal, { meal = it }, "餐次（早餐/午餐/晚餐/加餐）")
+                EditField(meal, { meal = it }, "餐次（早餐/午餐/晚餐/加餐/夜宵）")
                 Spacer(Modifier.height(8.dp))
                 EditField(kcal, { kcal = it }, "热量（千卡）", number = true)
                 Spacer(Modifier.height(8.dp))
@@ -603,7 +603,9 @@ private fun MealPicker(current: String, onPick: (String) -> Unit) {
     }
 }
 
-private val MEAL_OPTIONS = listOf("早餐", "午餐", "晚餐", "加餐")
+// 必须覆盖 _guess_meal / 模型可能给出的全部取值，否则会出现「四个 chip 全没选中、
+// 用户看不到当前餐次」的情况（夜宵就是被漏掉的那个）。
+private val MEAL_OPTIONS = listOf("早餐", "午餐", "晚餐", "加餐", "夜宵")
 
 @Composable
 private fun MealChip(

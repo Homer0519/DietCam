@@ -52,10 +52,10 @@
 | `astrbot_plugin_diet/` | AstrBot 插件：接收上传、落盘、调用模型、提供 `/饮食` 指令 |
 | `android/` | Android 客户端（Kotlin + Jetpack Compose + CameraX） |
 | `android/keystore/dietcam-release.jks` | **固定签名密钥库**，保证每次构建的包都能覆盖升级 |
-| `android/keystore.properties` | 签名配置（密钥库路径与口令） |
+| `android/keystore.properties` | 签名配置（密钥库路径与口令）——**只该留在本机**，见「签名与升级」 |
 | `.github/workflows/build-apk.yml` | GitHub Actions：自动编译 APK 并上传产物 |
 | `tools/` | 构建工具链安装、插件自测、演示、版本号递增脚本 |
-| `dist/` | 已编译好的 APK |
+| `dist/` | 本地打包产物（`*.apk` 在 .gitignore 里，不进版本库） |
 
 ## 快速部署
 
@@ -187,6 +187,23 @@ python tools/bump_version.py --show    # 查看当前版本
 
 ⚠️ 密钥库和口令一旦更换，所有用户都必须卸载重装。别丢、别改。
 
+**关于口令的存放。** 密钥库（`.jks`）**必须留在仓库里** —— 覆盖升级靠它，
+换掉它等于让所有人卸载重装。但**口令不该跟着进版本库**：`.gitignore` 和
+`android/keystore.properties.example` 已经准备好了，需要时两步移出：
+
+```bash
+git rm --cached android/keystore.properties   # 停止跟踪，本机文件保留
+git commit -m "chore: 签名口令移出版本库"
+```
+
+> ⚠️ 两点要有数：① 这一步会**同时从别人机器上删掉那份文件**，
+> 同伴拉取后需要照 `keystore.properties.example` 自己补一份；
+> ② 旧口令仍然留在 git 历史里，真正止血得换口令 —— 换口令**不会改变签名证书**
+> （指纹不变、升级链不断），但同属「动了就别丢」的操作，建议单独安排一次。
+> GitHub Actions 侧已改成从 `KEYSTORE_PROPERTIES` secret 读取，没配则显式告警。
+
+
+
 ## 安全说明
 
 - 上传接口除了 API Key，还要求 `X-Diet-Token`：由 `HMAC-SHA256(签名密钥, 过期时间戳)` 生成，5 分钟有效。
@@ -197,7 +214,7 @@ python tools/bump_version.py --show    # 查看当前版本
 
 不是"写完就交"，下面这些是实际跑出来的结果：
 
-**AstrBot 插件 — 222 项测试全部通过**
+**AstrBot 插件 — 295 项测试全部通过**
 
 ```bash
 python tools/run_all_checks.py      # 一键跑完下面全部检查
@@ -205,7 +222,7 @@ python tools/run_all_checks.py      # 一键跑完下面全部检查
 
 | 检查 | 说明 |
 | --- | --- |
-| `tools/plugin_selftest.py` | 222 项单元 + 端到端测试 |
+| `tools/plugin_selftest.py` | 295 项单元 + 端到端测试 |
 | `tools/verify_regression.py` | 验证测试本身有效（能区分修复前后） |
 | `tools/demo_plugin.py` | 端到端演示，兼作冒烟测试 |
 
@@ -231,6 +248,26 @@ python tools/demo_plugin.py
 
 会合成一张炒饭照片、走完"上传 → 落盘 → 分析 → 查询 → 取回"全流程，
 并打印 `/饮食` 指令的真实输出与磁盘文件结构，不需要任何模型服务。
+
+**已修复的真实问题（2.6.2 / 插件 1.3.2）**
+
+一份外部代码走查（`DietCam-代码走查.md`）逐行读完后，下面这些都被复现并修掉了。
+共同点是**本地模式（不连 AstrBot）没被当成一等公民** —— 它是后来加的，
+几处判断还停留在「必须有 baseUrl/secret」的旧假设上。
+
+| 问题 | 根因 | 用户看到的现象 |
+| --- | --- | --- |
+| 本地模式下「档案 / 日历 / 回忆」三页永远空白 | 三个 `refresh*()` 用 `baseUrl`/`secret` 判空早退，而本地模式这两个字段本来就不填 | 给人用的那条路直接残废 |
+| 本地模式下「保存并重算目标」点了没反应 | `saveProfile()` 的 `return` 排在 `_busy = true` 之前，静默返回 | 以为按钮坏了 |
+| 回忆页选「90 天」实际只给 30 天 | `/history` 给只收 3 个参数的 `_pick()` 多传了 `type=int`，抛出的 `TypeError` 被紧邻的 `except` 吞掉 | 以为已经看全了 |
+| 本地模式手动改目标会把其它三项清零 | `LocalDietApi.updateTargets` 整份替换 `targets`（插件版一直是先读再 merge） | 只填热量 → 蛋白/碳水/脂肪变 0 |
+| 点「切换摄像头」画面黑掉 | `AndroidView` 的 `factory` 只跑一次，`DisposableEffect(lensFacing)` 只 `unbindAll()` 不重新绑定 | 切前后摄即黑屏 |
+| 拍照失败、存相册失败全程无声 | 失败分支只 `file.delete()`，没有回传路径 | 不知道发生了什么 |
+| 「关于」页版本号写死 `2.1.0` | 与真实构建脱节（早已 2.6.x） | 报障时被这个数字带偏 |
+
+同步补上的测试：`/history` 的 `days` 现在逐个断言「传 7 就回 7、传 90 就回 90」——
+之前只断言 `days <= 365`，于是「参数整个失效」和一整套全绿测试可以同时成立，
+**测试替实现圆了谎**；本地模式的目标合并语义则由上面那组 JVM 单元测试守着。
 
 **已修复的真实问题（2.1.0）**
 
@@ -260,30 +297,40 @@ python tools/demo_plugin.py
 **Android 端 — 真实编译出包**
 
 ```
-BUILD SUCCESSFUL in 34s
-49 actionable tasks: 30 executed, 18 from cache, 1 up-to-date
+BUILD SUCCESSFUL in 5m 9s
+50 actionable tasks: 8 executed, 42 up-to-date
 ```
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-2.1.0-release.apk`（12.38 MB） |
-| 包名 / 版本 | `com.dietcam.app` v2.1.0 (versionCode 5) |
+| 产物 | `dist/DietCam-2.6.2-release.apk`（12.44 MB） |
+| 包名 / 版本 | `com.dietcam.app` v2.6.2 (versionCode 13) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
-| 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE |
+| 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE（+ API≤28 的 WRITE_EXTERNAL_STORAGE） |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
-| 签名方案 | APK Signature Scheme v2 + v3 均已校验通过 |
+| 签名方案 | `apksigner verify` 通过，证书与历史包完全一致 |
 | 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（跨构建稳定） |
-| SHA-256 | `87C51A2534831187B19C957E07170EBEF8E3BBF614E341E0DE751465D2511337` |
+| SHA-256 | `6AD851E0F2DCA38F1A22279B98C52AF8E1E4E047B8FF928E841A0D62FB082C5F` |
 
-**升级路径实测** —— 2.1.0 由 `bump_version.py` 递增后构建：
+**升级路径实测** —— 每次发版都由 `bump_version.py` 递增 versionCode 后构建，
+证书指纹始终是上面那一串：
 
-| | 1.0.0 | 2.0.0 |
+| | 1.0.0 | 2.6.2 |
 | --- | --- | --- |
 | applicationId | `com.dietcam.app` | `com.dietcam.app` ✅ 一致 |
-| versionCode | 1 | 4 ✅ 更大 |
+| versionCode | 1 | 13 ✅ 更大 |
 | 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d76d49a7…` ✅ 完全一致 |
 
 三个条件同时满足，因此新包会被系统识别为**升级**而不是新装。
 
-工具链：JDK 21 + Gradle 8.11.1 + AGP 8.7.3 + Kotlin 2.1.0 + Compose BOM 2024.12.01。
+工具链：Gradle 8.11.1 + AGP 8.7.3 + Kotlin 2.1.0 + Compose BOM 2024.12.01。
+本地构建用 JDK 21，GitHub Actions 用 JDK 17（`tools/build_android.ps1` 接受 JDK 17 及以上），两者编出的包完全一致。
+
+Android 端还有一组 JVM 单元测试（不需要模拟器）：
+
+```bash
+pwsh -File tools/build_android.ps1 -Task testReleaseUnitTest
+```
+
+守着「本地模式手动改目标」的合并语义——只填热量时不能把蛋白/碳水/脂肪清成 0。

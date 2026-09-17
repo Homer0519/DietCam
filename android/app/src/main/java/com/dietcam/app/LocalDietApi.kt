@@ -21,6 +21,25 @@ import java.util.TimeZone
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
+/** 孤儿照片的年龄保护窗口，与插件 main.py 的 SWEEP_MIN_AGE 对齐。 */
+private const val SWEEP_MIN_AGE_MS = 60_000L
+
+/**
+ * 把 [updates] 合并进当前生效的目标 [base]，只覆盖调用方真正传进来的键。
+ *
+ * 故意写成纯 Kotlin、不碰 JSONObject —— 这样 JVM 单元测试可以直接验证它。
+ * 以前这里是「新建一个 JSONObject 整份替换 targets」，在手动目标界面上只填热量
+ * 就会把蛋白/碳水/脂肪写成 0，首页的 MacroBar 随即变成 0 / 0g。
+ */
+internal fun mergeTargets(
+    base: Map<String, Double>,
+    updates: Map<String, Double>,
+): Map<String, Double> {
+    val merged = base.toMutableMap()
+    updates.forEach { (key, value) -> merged[key] = Math.round(value * 10.0) / 10.0 }
+    return merged
+}
+
 /**
  * 本地模式：完全不依赖 AstrBot。
  *
@@ -70,14 +89,30 @@ class LocalDietApi(
         return out
     }
 
+    /**
+     * 先写 .tmp 再 rename。
+     *
+     * 直接截断重写的话，写到一半被杀（断电、被系统清理）当天的记录就整份没了 ——
+     * records/<day>.jsonl 是唯一的真相来源。插件侧同样改成了原子写。
+     */
+    private fun writeAtomically(file: File, text: String) {
+        file.parentFile?.mkdirs()
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        tmp.writeText(text)
+        if (!tmp.renameTo(file)) {
+            // 少数文件系统上 renameTo 不覆盖已存在的目标，退化成直接写
+            file.writeText(text)
+            tmp.delete()
+        }
+    }
+
     private fun writeRecords(day: String, records: List<JSONObject>) {
         val file = recordFile(day)
         if (records.isEmpty()) {
             file.delete()
             return
         }
-        file.parentFile?.mkdirs()
-        file.writeText(records.joinToString("") { it.toString() + "\n" })
+        writeAtomically(file, records.joinToString("") { it.toString() + "\n" })
     }
 
     private fun appendRecord(day: String, record: JSONObject) {
@@ -93,7 +128,7 @@ class LocalDietApi(
 
     private fun saveState(state: JSONObject) {
         root.mkdirs()
-        stateFile.writeText(state.toString())
+        writeAtomically(stateFile, state.toString())
     }
 
     private fun allDays(): List<String> {
@@ -172,7 +207,21 @@ class LocalDietApi(
 
     // ------------------------------------------------------------ 接口
 
-    override suspend fun health(): JSONObject = JSONObject()
+    override suspend fun health(): JSONObject = withContext(Dispatchers.IO) {
+        // 「测试连接」会把 data_dir 显示出来，以前这里返回空对象，本地模式下
+        // 那一行永远是「数据目录：?」。
+        JSONObject()
+            .put("ok", true)
+            .put("plugin", "dietcam-local")
+            .put("local", true)
+            .put("data_dir", root.absolutePath)
+            .put(
+                "features",
+                JSONObject().put("stream", true).put("profile", true).put("calendar", true)
+                    .put("history", true).put("record_edit", true).put("record_delete", true)
+                    .put("record_reanalyze", true).put("text", true),
+            )
+    }
         .put("ok", true)
         .put("plugin", "local")
         .put("version", "本地模式")
@@ -216,12 +265,18 @@ class LocalDietApi(
     override suspend fun updateTargets(targets: Map<String, Double>): JSONObject =
         withContext(Dispatchers.IO) {
             val state = loadState()
-            val obj = JSONObject()
-            targets.forEach { (key, value) -> obj.put(key, round1(value)) }
-            state.put("targets", obj)
+            // 以「当前生效的目标」为底，只覆盖调用方真正传进来的键 —— 与插件版
+            // （main.py 的 api_targets 先读 current 再 merge）保持一致。
+            val currentTargets = targetsOf()
+            val base = buildMap {
+                currentTargets.keys().forEach { key -> put(key, currentTargets.optDouble(key, 0.0)) }
+            }
+            val merged = JSONObject()
+            mergeTargets(base, targets).forEach { (key, value) -> merged.put(key, value) }
+            state.put("targets", merged)
             state.put("targets_mode", "manual")
             saveState(state)
-            JSONObject().put("ok", true).put("targets", obj)
+            JSONObject().put("ok", true).put("targets", merged)
         }
 
     override suspend fun profile(): JSONObject = withContext(Dispatchers.IO) {
@@ -370,11 +425,20 @@ class LocalDietApi(
         JSONObject().put("ok", true).put("removed", removed).put("left", records.size)
     }
 
-    /** 没有记录引用的照片一律收掉（分析失败/中断留下的）。 */
+    /**
+     * 没有记录引用的照片一律收掉（分析失败/中断留下的）。
+     *
+     * 只删「够旧」的：正在分析中的那张照片此刻还没被任何记录引用，
+     * 不加年龄保护就会被并发的删除/编辑顺手误删，随后记录里的 photo 指向空文件。
+     * 插件 side 有同样的 60 秒窗口（main.py 的 SWEEP_MIN_AGE），两边口径要对齐。
+     */
     private fun sweepOrphans(day: String) {
         val used = loadRecords(day).map { it.optString("photo", "") }.toSet()
+        val now = System.currentTimeMillis()
         photosOf(day).listFiles()?.forEach { file ->
-            if (file.isFile && file.name !in used) file.delete()
+            if (!file.isFile || file.name in used) return@forEach
+            if (now - file.lastModified() < SWEEP_MIN_AGE_MS) return@forEach
+            file.delete()
         }
     }
 

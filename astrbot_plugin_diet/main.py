@@ -27,6 +27,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import os
 import re
 import time
 import uuid
@@ -58,10 +59,25 @@ except Exception:  # pragma: no cover - 兼容旧版本
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.3.1"
+PLUGIN_VERSION = "1.3.2"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+
+# data URL 里要贴的 MIME。以前只有 png / jpeg 两档，而白名单收了 webp 和 heic ——
+# 那两种图会被贴上 image/jpeg 的标签发出去，标签与真实字节不符。
+_IMAGE_MIME = {
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".heic": "image/heic",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+
+def _image_mime(path: Path) -> str:
+    return _IMAGE_MIME.get(path.suffix.lower(), "image/jpeg")
+
 
 # 清理孤儿照片时的最小年龄（秒）。
 # 刚上传、正在分析的图不能被误删，所以默认只清理「放了一会儿还没人认领」的。
@@ -438,9 +454,11 @@ class DietPlugin(Star):
             return {}
 
     def _save_state(self, state: dict) -> None:
+        # state.json 里是目标与身体档案，App 侧每次敲指令/上传都可能重写它，
+        # 同样不能「截断再写」。
         try:
-            self._state_file().write_text(
-                json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+            self._atomic_write_text(
+                self._state_file(), json.dumps(state, ensure_ascii=False, indent=2)
             )
         except OSError as exc:
             logger.warning("[diet] 写入 state.json 失败: %s", exc)
@@ -519,14 +537,31 @@ class DietPlugin(Star):
 
     # ------------------------------------------------------- 记录增删改查
 
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str) -> None:
+        """先写同目录的 .tmp，再 os.replace 顶上去。
+
+        直接以 "w" 打开会把原文件先截断：万一写到一半断电／进程被杀，
+        当天的记录就整份没了 —— 而 records/<day>.jsonl 是唯一的真相来源。
+        同目录 + os.replace 在 POSIX 与 Windows 上都是原子的。
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
     def _rewrite_records(self, day: str, records: list[dict]) -> None:
         """整文件重写当天记录（编辑、删除后用）。"""
         path = self._record_file(day)
         try:
             if records:
-                with path.open("w", encoding="utf-8") as fh:
-                    for item in records:
-                        fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+                self._atomic_write_text(
+                    path,
+                    "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records),
+                )
             elif path.exists():
                 path.unlink()
         except OSError as exc:
@@ -683,7 +718,7 @@ class DietPlugin(Star):
 
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         if path is not None:
-            mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+            mime = _image_mime(path)
             b64 = base64.b64encode(path.read_bytes()).decode("ascii")
             content.append(
                 {"type": "image_url", "image_url": {"url": "data:" + mime + ";base64," + b64}}
@@ -744,7 +779,7 @@ class DietPlugin(Star):
 
         image_urls: list[str] | None = None
         if path is not None:
-            mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+            mime = _image_mime(path)
             b64 = base64.b64encode(path.read_bytes()).decode("ascii")
             image_urls = ["data:" + mime + ";base64," + b64]
         resp = await self.context.llm_generate(
@@ -1376,8 +1411,12 @@ class DietPlugin(Star):
         """最近若干天的逐条记录，供回忆页做时间线。"""
         if not self._authorized():
             return error_response("unauthorized")
+        # _pick 只接受 (mapping, key, default) 三个参数。以前这里多传了个 type=int，
+        # 结果是每次调用都抛 TypeError，又被下面的 except 吞掉 —— days 永远是 30，
+        # 回忆页切「90 天」拿到的还是 30 天，而且测试只断言 days <= 365，看不出来。
+        raw_days = _pick(request.query, "days", 30)
         try:
-            days = int(_pick(request.query, "days", 30, type=int) or 30)
+            days = int(raw_days)
         except (TypeError, ValueError):
             days = 30
         days = max(1, min(days, 365))

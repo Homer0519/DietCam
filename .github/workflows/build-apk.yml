@@ -39,6 +39,21 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
+      - name: Prepare signing config
+        # 仓库里不再存明文口令：配了 secret 就用它生成 keystore.properties，
+        # 没配就退化成 debug 签名 —— 那样打出来的包无法覆盖升级正式包，所以显式告警。
+        env:
+          KEYSTORE_PROPERTIES: ${{ secrets.KEYSTORE_PROPERTIES }}
+        run: |
+          if [ -n "$KEYSTORE_PROPERTIES" ]; then
+            printf '%s\n' "$KEYSTORE_PROPERTIES" > keystore.properties
+            echo "已从 KEYSTORE_PROPERTIES secret 写入签名配置"
+          elif [ -f keystore.properties ]; then
+            echo "使用仓库内已有的 keystore.properties"
+          else
+            echo "::warning::未配置 KEYSTORE_PROPERTIES secret，本次产物为 debug 签名，不能覆盖升级正式包"
+          fi
+
       - name: Build release APK
         run: gradle assembleRelease --no-daemon --console=plain
 

@@ -49,6 +49,7 @@ fun ProfileScreen(
 ) {
     val info by vm.profile.collectAsStateWithLifecycle()
     val busy by vm.busy.collectAsStateWithLifecycle()
+    val serverVersion by vm.serverVersion.collectAsStateWithLifecycle()
 
     var height by remember { mutableStateOf("") }
     var weight by remember { mutableStateOf("") }
@@ -152,8 +153,14 @@ fun ProfileScreen(
 
             item {
                 SectionCard("关于") {
-                    AboutLine("当前版本", "2.1.0")
-                    AboutLine("服务端插件", "v1.2.0 及以上支持档案与日历")
+                    // 版本号统一从构建产物读，别再手写 —— 之前这里写死 2.1.0，
+                    // 而实际构建早就是 2.6.x 了，用户报障会被这个数字带偏。
+                    AboutLine("当前版本", BuildConfig.VERSION_NAME)
+                    if (vm.settings().localMode) {
+                        AboutLine("运行方式", "本地模式 · 不依赖 AstrBot")
+                    } else {
+                        AboutLine("服务端插件", serverVersion?.let { "v" + it } ?: "未连接")
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "目标按 Mifflin-St Jeor 公式推算：先算基础代谢，再乘活动系数，最后按减脂/维持/增重调整。",

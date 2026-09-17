@@ -29,8 +29,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // 每次发新版本都要把 versionCode 加 1，否则部分系统不会认为是升级
-        versionCode = 12
-        versionName = "2.6.1"
+        versionCode = 13
+        versionName = "2.6.2"
     }
 
     signingConfigs {
@@ -78,6 +78,8 @@ android {
 
     buildFeatures {
         compose = true
+        // 「关于」页要显示真实版本号（BuildConfig.VERSION_NAME），不能再手写
+        buildConfig = true
     }
 
     packaging {
@@ -116,4 +118,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // JVM 单元测试（不需要模拟器：只测纯逻辑，例如目标合并语义）
+    testImplementation("junit:junit:4.13.2")
 }

@@ -361,6 +361,10 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
     private val _profile = MutableStateFlow<ProfileInfo?>(null)
     val profile: StateFlow<ProfileInfo?> = _profile.asStateFlow()
 
+    /** 服务端插件的实际版本（连上 AstrBot 时才拿得到），供「关于」显示，避免写死。 */
+    private val _serverVersion = MutableStateFlow<String?>(null)
+    val serverVersion: StateFlow<String?> = _serverVersion.asStateFlow()
+
     private val _calendar = MutableStateFlow<CalendarMonth?>(null)
     val calendar: StateFlow<CalendarMonth?> = _calendar.asStateFlow()
 
@@ -372,17 +376,31 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshProfile() {
         val current = store.snapshot()
-        if (current.baseUrl.isBlank() || current.secret.isBlank()) return
+        // 不能用 baseUrl/secret 判空：本地模式下这两个字段本来就空着，
+        // 那样档案页会永远加载不出来。一律以 store.isConfigured() 为准。
+        if (!store.isConfigured()) return
         viewModelScope.launch {
-            runCatching { dietBackend(getApplication<Application>(), current).profile() }
+            val backend = dietBackend(getApplication<Application>(), current)
+            runCatching { backend.profile() }
                 .onSuccess { _profile.value = ProfileParse.info(it) }
                 .onFailure { _notice.value = Notice("读取档案失败", DietApi.friendlyMessage(it)) }
+            if (!current.localMode) {
+                // 顺手把服务端插件版本带回来，「关于」里就不用写死版本号了
+                runCatching { backend.health() }.onSuccess { json ->
+                    _serverVersion.value = json.optString("version").takeIf { v -> v.isNotBlank() }
+                }
+            }
         }
     }
 
     fun saveProfile(profile: BodyProfile, onDone: () -> Unit = {}) {
         val current = store.snapshot()
-        if (current.baseUrl.isBlank()) return
+        if (!store.isConfigured()) {
+            // 以前这里是静默 return（而且排在 _busy = true 前面），
+            // 本地模式下点「保存并重算目标」连转圈都没有，看起来像按钮坏了。
+            _notice.value = Notice("还没配置好", notReadyMessage())
+            return
+        }
         _busy.value = true
         viewModelScope.launch {
             try {
@@ -416,7 +434,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshCalendar(month: String) {
         val current = store.snapshot()
-        if (current.baseUrl.isBlank() || current.secret.isBlank()) return
+        if (!store.isConfigured()) return
         viewModelScope.launch {
             runCatching { dietBackend(getApplication<Application>(), current).calendar(month) }
                 .onSuccess { _calendar.value = ProfileParse.calendar(it) }
@@ -426,7 +444,7 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshHistory(days: Int = 30) {
         val current = store.snapshot()
-        if (current.baseUrl.isBlank() || current.secret.isBlank()) return
+        if (!store.isConfigured()) return
         viewModelScope.launch {
             runCatching { dietBackend(getApplication<Application>(), current).history(days) }
                 .onSuccess { json ->

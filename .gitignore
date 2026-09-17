@@ -3,6 +3,11 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+# 签名口令不该进版本库。密钥库本身要留着（覆盖升级靠它），口令请配合
+# GitHub Secret / 本机文件使用；详见 README「签名与升级」。
+# 注意：该文件目前仍在版本库里，需要时用下面这行停跟踪（会同时从别人机器上删掉）：
+#   git rm --cached android/keystore.properties
+android/keystore.properties
 android/.idea/
 *.iml
 *.apk

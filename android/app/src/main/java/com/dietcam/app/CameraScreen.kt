@@ -73,6 +73,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -171,10 +172,15 @@ fun CameraScreen(
                 ),
             )
         } else if (state is CaptureUiState.Live && hasPermission) {
-            CameraPreview(
-                lensFacing = lensFacing,
-                onReady = { capture = it },
-            )
+            // 换镜头必须把整个 CameraPreview 重建：AndroidView 的 factory 只在首次
+            // 组合时执行，而 DisposableEffect(lensFacing) 翻面时只 unbindAll()、
+            // 不会重新 bindToLifecycle —— 结果就是点「切换摄像头」当场黑屏。
+            key(lensFacing) {
+                CameraPreview(
+                    lensFacing = lensFacing,
+                    onReady = { capture = it },
+                )
+            }
         } else if (state is CaptureUiState.Live) {
             PermissionPrompt { permissionLauncher.launch(neededPermissions) }
         }
@@ -213,7 +219,14 @@ fun CameraScreen(
                         note = ""
                     },
                     onCapture = {
-                        capturePicture(context, capture) { file -> vm.onPhotoCaptured(file) }
+                        capturePicture(
+                            context = context,
+                            capture = capture,
+                            onSaved = { file -> vm.onPhotoCaptured(file) },
+                            onError = { reason ->
+                                Toast.makeText(context, reason, Toast.LENGTH_SHORT).show()
+                            },
+                        )
                     },
                     onPick = { galleryLauncher.launch(Unit) },
                 )
@@ -227,8 +240,13 @@ fun CameraScreen(
                         // 只在确认采用的那一刻存，而且只存「刚拍的」：
                         //  · 存确认而不是快门 —— 点「重拍」丢掉的照片不会留在相册里
                         //  · 跳过相册选来的图 —— 它本来就在相册里，再存一份就是重复
-                        if (!current.fromGallery && PhotoGallery.saveToAlbum(context, current.file)) {
-                            Toast.makeText(context, "原图已存入相册", Toast.LENGTH_SHORT).show()
+                        if (!current.fromGallery) {
+                            val saved = PhotoGallery.saveToAlbum(context, current.file)
+                            Toast.makeText(
+                                context,
+                                if (saved) "原图已存入相册" else "存相册失败，照片仍保留在应用内",
+                                Toast.LENGTH_SHORT,
+                            ).show()
                         }
                         vm.confirmPhoto(note.trim())
                     },
@@ -317,8 +335,13 @@ private fun capturePicture(
     context: android.content.Context,
     capture: ImageCapture?,
     onSaved: (File) -> Unit,
+    onError: (String) -> Unit = {},
 ) {
-    if (capture == null) return
+    if (capture == null) {
+        // 取景器还没 bind 好（刚进页面就按快门）时以前是彻底静默的
+        onError("相机还没准备好，稍等一下再拍")
+        return
+    }
     val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
     val file = File(context.cacheDir, "meal_" + stamp + ".jpg")
     val options = ImageCapture.OutputFileOptions.Builder(file).build()
@@ -332,6 +355,7 @@ private fun capturePicture(
 
             override fun onError(exception: ImageCaptureException) {
                 file.delete()
+                onError("拍照失败：" + (exception.message ?: "未知原因"))
             }
         },
     )
