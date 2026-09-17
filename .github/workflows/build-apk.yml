@@ -4,11 +4,11 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - 'dietcam/android/**'
+      - 'android/**'
       - '.github/workflows/build-apk.yml'
   pull_request:
     paths:
-      - 'dietcam/android/**'
+      - 'android/**'
   workflow_dispatch:
 
 permissions:
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: dietcam/android
+        working-directory: android
 
     steps:
       - name: Checkout
@@ -65,6 +65,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: DietCam-release-apk
-          path: dietcam/android/app/build/outputs/apk/release/*.apk
+          path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
