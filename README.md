@@ -163,7 +163,10 @@ Android 判断能否**覆盖升级**，看三件事同时满足：
 
 **① 签名固定下来了，但密钥不在仓库里。**
 密钥库放在 `android/keystore/dietcam-release.jks`（本机），CI 从 GitHub Secret 还原；
-仓库里只有一份 `keystore.properties.example` 说明格式。证书指纹固定为：
+仓库里只有一份 `keystore.properties.example` 说明格式。
+**签名密钥自始至终没换过**，所以装了任何历史版本的人都能一路覆盖升级。
+（仓库转公开时做过一次历史清理，把这把密钥连同明文口令从所有提交里抹掉了 ——
+密钥库本身没变，指纹仍是下面这串。）证书指纹固定为：
 
 ```
 CN=DietCam, OU=Personal, O=DietCam, C=CN
@@ -311,30 +314,30 @@ python tools/demo_plugin.py
 **Android 端 — 真实编译出包**
 
 ```
-BUILD SUCCESSFUL in 38s
-50 actionable tasks: 8 executed, 42 up-to-date
+BUILD SUCCESSFUL in 49s
+50 actionable tasks: 18 executed, 32 up-to-date
 ```
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-2.7.0-release.apk`（12.5 MB） |
-| 包名 / 版本 | `com.dietcam.app` v2.7.0 (versionCode 16) |
+| 产物 | `dist/DietCam-2.7.1-release.apk`（12.5 MB） |
+| 包名 / 版本 | `com.dietcam.app` v2.7.1 (versionCode 17) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE（+ API≤28 的 WRITE_EXTERNAL_STORAGE） |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
 | 签名方案 | `apksigner verify` 通过，证书与历史包完全一致 |
-| 证书指纹 | `d5efa5927289ae2b1f5c324aea07ce383d15102d502a6d4713fbc0f96eb80667`（2.7.0 起的新密钥） |
-| SHA-256 | `E4AB3A8618CD3780C97B6D04260C71C90ACCA761F44C491409F735F3BE42CC0E` |
+| 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（自始至终未变） |
+| SHA-256 | `9C43B15959EE1DE8221FA10A00187A6F4ED63BC474F0DC10F71ABEC181D16A2F` |
 
 **升级路径实测** —— 每次发版都由 `bump_version.py` 递增 versionCode 后构建，
 证书指纹始终是上面那一串：
 
-| | 1.0.0 | 2.7.0 |
+| | 1.0.0 | 2.7.1 |
 | --- | --- | --- |
 | applicationId | `com.dietcam.app` | `com.dietcam.app` ✅ 一致 |
-| versionCode | 1 | 15 ✅ 更大 |
-| 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d5efa592…` ⚠️ **2.7.0 换过密钥** |
+| versionCode | 1 | 17 ✅ 更大 |
+| 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d76d49a7…` ✅ 完全一致 |
 
 三个条件同时满足，因此新包会被系统识别为**升级**而不是新装。
 

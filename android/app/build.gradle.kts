@@ -29,8 +29,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // 每次发新版本都要把 versionCode 加 1，否则部分系统不会认为是升级
-        versionCode = 16
-        versionName = "2.7.0"
+        versionCode = 17
+        versionName = "2.7.1"
     }
 
     signingConfigs {
