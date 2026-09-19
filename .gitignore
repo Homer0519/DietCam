@@ -34,6 +34,9 @@ dist/*.bundle
 .selftest_data/
 .ziptest/
 
-# 签名口令不该进版本库（密钥库 .jks 本身要留着 —— 覆盖升级靠它）：
-#   git rm --cached android/keystore.properties
+# 签名材料一律不进版本库。本机放 android/keystore/ 下，
+# CI 从 GitHub Secrets（KEYSTORE_BASE64 / KEYSTORE_PROPERTIES）还原。
+# 丢了密钥库 = 所有用户必须卸载重装，务必在仓库之外另存一份。
+android/keystore/*.jks
+android/keystore/*.keystore
 android/keystore.properties

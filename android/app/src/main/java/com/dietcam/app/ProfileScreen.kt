@@ -161,6 +161,13 @@ fun ProfileScreen(
                     } else {
                         AboutLine("服务端插件", serverVersion?.let { "v" + it } ?: "未连接")
                     }
+                    Spacer(Modifier.height(6.dp))
+                    TextButton(
+                        onClick = { vm.checkUpdate(manual = true) },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Text("检查更新", color = Palette.Accent, fontSize = 12.sp)
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "目标按 Mifflin-St Jeor 公式推算：先算基础代谢，再乘活动系数，最后按减脂/维持/增重调整。",

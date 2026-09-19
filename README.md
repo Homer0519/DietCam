@@ -51,7 +51,7 @@
 | --- | --- |
 | `astrbot_plugin_diet/` | AstrBot 插件：接收上传、落盘、调用模型、提供 `/饮食` 指令 |
 | `android/` | Android 客户端（Kotlin + Jetpack Compose + CameraX） |
-| `android/keystore/dietcam-release.jks` | **固定签名密钥库**，保证每次构建的包都能覆盖升级 |
+| `android/keystore/` | 签名密钥库放这里 —— **已被 .gitignore 排除，不进仓库**（公钥可公开，私钥不行） |
 | `android/keystore.properties` | 签名配置（密钥库路径与口令）——**只该留在本机**，见「签名与升级」 |
 | `tools/` | 构建工具链安装、插件自测、演示、版本号递增脚本 |
 | `dist/` | 本地打包产物（`*.apk` 在 .gitignore 里，不进版本库） |
@@ -161,8 +161,9 @@ Android 判断能否**覆盖升级**，看三件事同时满足：
 
 这三条对应到项目里的做法：
 
-**① 签名固定下来了。** 密钥库提交在仓库里（`android/keystore/dietcam-release.jks`），
-本地构建和 GitHub Actions 都用它签名，证书指纹固定为：
+**① 签名固定下来了，但密钥不在仓库里。**
+密钥库放在 `android/keystore/dietcam-release.jks`（本机），CI 从 GitHub Secret 还原；
+仓库里只有一份 `keystore.properties.example` 说明格式。证书指纹固定为：
 
 ```
 CN=DietCam, OU=Personal, O=DietCam, C=CN
@@ -203,6 +204,19 @@ git commit -m "chore: 签名口令移出版本库"
 > GitHub Actions 侧已改成从 `KEYSTORE_PROPERTIES` secret 读取，没配则显式告警。
 
 
+
+## 自动更新
+
+App 启动时会**一天最多一次**静默查一次 GitHub Release（`/releases/latest`）；
+发现更高的版本号才弹窗，显示版本号和更新说明，点「下载更新」交
+系统的 `DownloadManager` 把 APK 下到「下载」目录 —— 下完点通知栏那一项就能装。
+不申请「安装未知应用」权限，也不用 FileProvider。
+
+「我的」页的「关于」卡片里有 **检查更新**，手动点会明确告诉你结果
+（有新版就弹窗，没有就提示「已是最新版本」—— 不做那种点了没反应的按钮）。
+
+> 这条链路依赖仓库是**公开**的：私有仓库的 releases 接口要带 token，
+> 而 token 不能塞进 APK 里。检查失败一律静默，不影响正常记账。
 
 ## 安全说明
 
@@ -303,24 +317,24 @@ BUILD SUCCESSFUL in 38s
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-2.6.4-release.apk`（12.44 MB） |
-| 包名 / 版本 | `com.dietcam.app` v2.6.4 (versionCode 15) |
+| 产物 | `dist/DietCam-2.7.0-release.apk`（12.5 MB） |
+| 包名 / 版本 | `com.dietcam.app` v2.7.0 (versionCode 16) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE（+ API≤28 的 WRITE_EXTERNAL_STORAGE） |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
 | 签名方案 | `apksigner verify` 通过，证书与历史包完全一致 |
-| 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（跨构建稳定） |
-| SHA-256 | `068A8D950F41D693D3C44B963928090F39C2C33AC4A7A98619DA8667DA07D626` |
+| 证书指纹 | `d5efa5927289ae2b1f5c324aea07ce383d15102d502a6d4713fbc0f96eb80667`（2.7.0 起的新密钥） |
+| SHA-256 | `E4AB3A8618CD3780C97B6D04260C71C90ACCA761F44C491409F735F3BE42CC0E` |
 
 **升级路径实测** —— 每次发版都由 `bump_version.py` 递增 versionCode 后构建，
 证书指纹始终是上面那一串：
 
-| | 1.0.0 | 2.6.4 |
+| | 1.0.0 | 2.7.0 |
 | --- | --- | --- |
 | applicationId | `com.dietcam.app` | `com.dietcam.app` ✅ 一致 |
 | versionCode | 1 | 15 ✅ 更大 |
-| 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d76d49a7…` ✅ 完全一致 |
+| 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d5efa592…` ⚠️ **2.7.0 换过密钥** |
 
 三个条件同时满足，因此新包会被系统识别为**升级**而不是新装。
 

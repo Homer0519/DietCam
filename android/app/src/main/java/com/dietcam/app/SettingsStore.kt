@@ -54,6 +54,11 @@ class SettingsStore(context: Context) {
         get() = prefs.getString("model_name", "") ?: ""
         set(value) = prefs.edit().putString("model_name", value.trim()).apply()
 
+    /** 上次检查更新的时间戳（毫秒）。启动时一天最多查一次，免得老骚扰用户。 */
+    var lastUpdateCheck: Long
+        get() = prefs.getLong("last_update_check", 0L)
+        set(value) = prefs.edit().putLong("last_update_check", value).apply()
+
     fun snapshot(): DietSettings =
         DietSettings(baseUrl, apiKey, secret, localMode, modelBaseUrl, modelApiKey, modelName)
 

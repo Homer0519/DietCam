@@ -63,6 +63,7 @@ $compilerCp = (@($compiler) + $compilerExtra + $jars) -join ";"
 $src = "$J\android\app\src\main\java\com\dietcam\app"
 $files = @(
     "$src\Model.kt",
+    "$src\VersionCompare.kt",
     "$src\SettingsStore.kt",
     "$src\DietBackend.kt",
     "$src\DietApi.kt",

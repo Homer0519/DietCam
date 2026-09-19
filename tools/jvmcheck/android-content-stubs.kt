@@ -27,11 +27,13 @@ open class Context {
 interface SharedPreferences {
     fun getString(key: String, defValue: String?): String?
     fun getBoolean(key: String, defValue: Boolean): Boolean
+    fun getLong(key: String, defValue: Long): Long
     fun edit(): Editor
 
     interface Editor {
         fun putString(key: String, value: String?): Editor
         fun putBoolean(key: String, value: Boolean): Editor
+        fun putLong(key: String, value: Long): Editor
         fun apply()
     }
 }
@@ -40,12 +42,17 @@ class MemoryPrefs : SharedPreferences {
     private val map = HashMap<String, Any?>()
     override fun getString(key: String, defValue: String?): String? = map[key] as? String ?: defValue
     override fun getBoolean(key: String, defValue: Boolean): Boolean = map[key] as? Boolean ?: defValue
+    override fun getLong(key: String, defValue: Long): Long = map[key] as? Long ?: defValue
     override fun edit(): SharedPreferences.Editor = object : SharedPreferences.Editor {
         override fun putString(key: String, value: String?): SharedPreferences.Editor {
             map[key] = value
             return this
         }
         override fun putBoolean(key: String, value: Boolean): SharedPreferences.Editor {
+            map[key] = value
+            return this
+        }
+        override fun putLong(key: String, value: Long): SharedPreferences.Editor {
             map[key] = value
             return this
         }

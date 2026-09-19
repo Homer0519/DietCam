@@ -3,6 +3,7 @@ package jvmcheck
 
 import com.dietcam.app.DietSettings
 import com.dietcam.app.LocalDietApi
+import com.dietcam.app.isNewerVersion
 import com.dietcam.app.parseStreamLine
 import com.dietcam.app.parseWholeBody
 import kotlinx.coroutines.runBlocking
@@ -221,6 +222,17 @@ fun main() {
         parseWholeBody("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"完整回答\"}}]}") == "完整回答")
     check("整包 content 为 null 时返回 null",
         parseWholeBody("{\"choices\":[{\"message\":{\"content\":null}}]}") == null)
+
+    section("13. 版本号比较（决定要不要提示更新）")
+    check("2.7.0 > 2.6.4", isNewerVersion("2.7.0", "2.6.4"))
+    check("1.10.0 > 1.9.9（按字符串比会判错）", isNewerVersion("1.10.0", "1.9.9"))
+    check("2.6.4 不比 2.6.4 新", !isNewerVersion("2.6.4", "2.6.4"))
+    check("2.6.3 不比 2.6.4 新", !isNewerVersion("2.6.3", "2.6.4"))
+    check("2.6.4.1 > 2.6.4（段数不齐按 0 补）", isNewerVersion("2.6.4.1", "2.6.4"))
+    check("前缀 v 也能处理", isNewerVersion("v2.7.0", "2.6.4"))
+    check("预发布后缀只取数字部分", isNewerVersion("2.7.0-beta.1", "2.6.4"))
+    check("预发布不比正式版新", !isNewerVersion("2.7.0-beta.1", "2.7.0"))
+    check("空字符串不新", !isNewerVersion("", "2.6.4"))
 
     section("11. 本地模式不再依赖 baseUrl / secret")
     check("baseUrl 是空的（这就是本地模式的样子）", settings.baseUrl.isBlank())

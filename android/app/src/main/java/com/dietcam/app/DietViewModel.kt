@@ -141,6 +141,56 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _notice.value = null
     }
 
+    // ---------------------------------------------------------- 版本更新
+
+    private val _update = MutableStateFlow<UpdateInfo?>(null)
+    val update: StateFlow<UpdateInfo?> = _update.asStateFlow()
+
+    /** 启动时自动查一次，但一天最多一次 —— 更新提示不该天天糊在脸上。 */
+    fun checkUpdateIfDue() {
+        val dayMs = 24L * 60 * 60 * 1000
+        if (System.currentTimeMillis() - store.lastUpdateCheck < dayMs) return
+        checkUpdate(manual = false)
+    }
+
+    /**
+     * 查 GitHub Release 有没有新版。
+     * [manual] 为 true（用户主动点「检查更新」）时，没有新版也要给个回执，
+     * 否则点一下什么都没发生，又会变成「按了没反应」。
+     */
+    fun checkUpdate(manual: Boolean) {
+        val current = BuildConfig.VERSION_NAME
+        viewModelScope.launch {
+            val info = UpdateChecker.check(current)
+            store.lastUpdateCheck = System.currentTimeMillis()
+            if (info != null) {
+                _update.value = info
+            } else if (manual) {
+                _notice.value = Notice("已是最新版本", "当前 " + current + "，GitHub 上没有更新的发布。")
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        _update.value = null
+    }
+
+    /** 把新版 APK 交给系统下载器，下完点通知栏那一项即可安装。 */
+    fun downloadUpdate() {
+        val info = _update.value ?: return
+        _update.value = null
+        val started = info.apkUrl.isNotBlank() && ApkDownloader.start(getApplication(), info)
+        _notice.value = if (started) {
+            Notice(
+                "已开始下载",
+                "DietCam " + info.version + " 正在后台下载（存到「下载」目录）。\n" +
+                    "下完点通知栏里的那一项就能安装。",
+            )
+        } else {
+            Notice("请手动下载", "打开发布页复制链接下载：\n" + info.pageUrl)
+        }
+    }
+
     fun testConnection(settings: DietSettings = store.snapshot()) {
         val current = settings
         val missing = mutableListOf<String>()

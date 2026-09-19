@@ -101,11 +101,14 @@ private fun DietCamApp(vm: DietViewModel) {
     var showSettings by remember { mutableStateOf(false) }
     val notice by vm.notice.collectAsStateWithLifecycle()
     val models by vm.models.collectAsStateWithLifecycle()
+    val update by vm.update.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         if (!vm.isConfigured()) showSettings = true
         vm.refreshHome()
         vm.refreshProfile()
+        // 一天最多查一次，静默失败也不打扰
+        vm.checkUpdateIfDue()
     }
 
     LaunchedEffect(tab) {
@@ -193,6 +196,64 @@ private fun DietCamApp(vm: DietViewModel) {
             onDismiss = { vm.dismissNotice() },
         )
     }
+
+    update?.let { info ->
+        UpdateDialog(
+            info = info,
+            current = BuildConfig.VERSION_NAME,
+            onDownload = { vm.downloadUpdate() },
+            onLater = { vm.dismissUpdate() },
+        )
+    }
+}
+
+@Composable
+private fun UpdateDialog(
+    info: UpdateInfo,
+    current: String,
+    onDownload: () -> Unit,
+    onLater: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onLater,
+        title = { Text("发现新版本 " + info.version, fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(
+                Modifier
+                    .heightIn(max = 380.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    "当前版本 " + current,
+                    color = Palette.TextTertiary,
+                    fontSize = 12.sp,
+                )
+                if (info.notes.isNotBlank()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        info.notes,
+                        color = Palette.TextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDownload,
+                shape = RoundedCornerShape(Radii.sm),
+                colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
+            ) {
+                Text("下载更新", color = Palette.OnAccent, fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onLater) {
+                Text("稍后", color = Palette.TextSecondary)
+            }
+        },
+    )
 }
 
 @Composable
