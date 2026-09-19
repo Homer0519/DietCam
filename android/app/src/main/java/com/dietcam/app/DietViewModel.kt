@@ -217,13 +217,50 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
 
     fun saveTargets(targets: Map<String, Double>) {
         val current = store.snapshot()
-        if (!store.isConfigured()) return
+        if (!store.isConfigured()) {
+            _notice.value = Notice("还没配置好", notReadyMessage())
+            return
+        }
+        if (targets.isEmpty()) {
+            _notice.value = Notice("没填写目标", "四个框里至少填一个再保存。")
+            return
+        }
+        _busy.value = true
         viewModelScope.launch {
             try {
-                dietBackend(getApplication<Application>(), current).updateTargets(targets)
+                val backend = dietBackend(getApplication<Application>(), current)
+                backend.updateTargets(targets)
+
+                // 存完必须把**档案**也重新读一遍。
+                // 以前这里只刷新了首页：「每日目标」卡片读的是 _profile，
+                // 而 _profile 还停在保存前那份 —— 于是刚写进去的手动热量
+                // 被「按档案自动推算」的旧值盖着显示，用户看到的就是
+                // 「改不了热量，只能按推荐的走」。
+                val reread = runCatching { backend.profile() }.getOrNull()
+                if (reread != null) _profile.value = ProfileParse.info(reread)
+                val shown = _profile.value
+
+                _notice.value = Notice(
+                    "手动目标已保存",
+                    buildString {
+                        val t = shown?.targets
+                        if (t != null) {
+                            append("每日 " + t.kcal.roundToInt() + " 千卡\n")
+                            append("蛋白 " + t.protein.roundToInt() + " g · 碳水 " +
+                                t.carbs.roundToInt() + " g · 脂肪 " + t.fat.roundToInt() + " g\n")
+                        }
+                        if (shown?.mode != "manual") {
+                            append("\n⚠️ 保存后模式不是「手动」，可能没写进去 —— 请点设置里的自检。")
+                        } else {
+                            append("\n这些是手动值；之后再改「身体档案」并保存，会重新按公式推算。")
+                        }
+                    },
+                )
                 refreshHome()
             } catch (e: Exception) {
                 _notice.value = Notice("保存目标失败", DietApi.friendlyMessage(e))
+            } finally {
+                _busy.value = false
             }
         }
     }

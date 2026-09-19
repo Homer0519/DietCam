@@ -3,6 +3,8 @@ package jvmcheck
 
 import com.dietcam.app.DietSettings
 import com.dietcam.app.LocalDietApi
+import com.dietcam.app.parseStreamLine
+import com.dietcam.app.parseWholeBody
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import java.io.File
@@ -132,7 +134,14 @@ fun main() {
     check("蛋白质没被清零", mt.optDouble("protein_g") > 0, mt.optDouble("protein_g"))
     check("碳水没被清零", mt.optDouble("carbs_g") > 0)
     check("脂肪没被清零", mt.optDouble("fat_g") > 0)
-    check("模式变成 manual", run { api.profile() }.optString("targets_mode") == "manual")
+    val afterManual = run { api.profile() }
+    check("模式变成 manual", afterManual.optString("targets_mode") == "manual")
+    // 这两条是「改得动热量」的地基：卡片保存后会重新调 profile()，
+    // 如果 profile() 回的还是按档案算的值，界面就永远显示推荐值。
+    check("再读档案时 targets 就是手动值", close(afterManual.optJSONObject("targets")!!.optDouble("calories_kcal"), 1800.0, 0.05),
+        afterManual.optJSONObject("targets")!!.optDouble("calories_kcal"))
+    check("手动值确实不同于推荐值（$after）",
+        !close(afterManual.optJSONObject("targets")!!.optDouble("calories_kcal"), after, 1.0))
 
     section("6. 再存一次档案 → 手动目标让位给自动推算")
     val again = run {
@@ -191,6 +200,27 @@ fun main() {
     check("state.json 存在", stateFile.isFile)
     check("没有留下 .tmp 残渣", File(ctx.testFilesDir, "diet").listFiles()!!.none { it.name.endsWith(".tmp") },
         File(ctx.testFilesDir, "diet").listFiles()!!.map { it.name })
+
+    section("12. 流式分片解析（真机上滚出一整屏 null 的那个雷）")
+    check("正常分片取到文本",
+        parseStreamLine("data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}") == "好")
+    check("content 是 JSON null 时什么都不吐（不是字符串 null）",
+        parseStreamLine("data: {\"choices\":[{\"delta\":{\"content\":null,\"reasoning_content\":\"想想\"}}]}") == null)
+    check("只带 reasoning_content 的推理分片不吐字",
+        parseStreamLine("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"嗯\"}}]}") == null)
+    check("[DONE] 不吐字", parseStreamLine("data: [DONE]") == null)
+    check("空行不吐字", parseStreamLine("") == null)
+    check("非 data 行不吐字", parseStreamLine("event: ping") == null)
+    check("残缺 JSON 不抛异常", parseStreamLine("data: {oops") == null)
+    check("choices 空数组不吐字", parseStreamLine("data: {\"choices\":[]}") == null)
+    check("空字符串内容不吐字",
+        parseStreamLine("data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}") == null)
+    check("字面量 \"null\" 内容也不会漏出去",
+        parseStreamLine("data: {\"choices\":[{\"delta\":{\"content\":\"null\"}}]}") == null)
+    check("不认 stream 的服务端：整包返回能兜住",
+        parseWholeBody("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"完整回答\"}}]}") == "完整回答")
+    check("整包 content 为 null 时返回 null",
+        parseWholeBody("{\"choices\":[{\"message\":{\"content\":null}}]}") == null)
 
     section("11. 本地模式不再依赖 baseUrl / secret")
     check("baseUrl 是空的（这就是本地模式的样子）", settings.baseUrl.isBlank())

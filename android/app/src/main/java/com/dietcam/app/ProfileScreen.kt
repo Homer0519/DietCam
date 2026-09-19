@@ -149,7 +149,7 @@ fun ProfileScreen(
                 }
             }
 
-            item { TargetsCard(info, vm) }
+            item { TargetsCard(info, vm, busy) }
 
             item {
                 SectionCard("关于") {
@@ -175,7 +175,7 @@ fun ProfileScreen(
 }
 
 @Composable
-private fun TargetsCard(info: ProfileInfo?, vm: DietViewModel) {
+private fun TargetsCard(info: ProfileInfo?, vm: DietViewModel, busy: Boolean) {
     var manual by remember { mutableStateOf(false) }
     var kcal by remember { mutableStateOf("") }
     var protein by remember { mutableStateOf("") }
@@ -242,11 +242,16 @@ private fun TargetsCard(info: ProfileInfo?, vm: DietViewModel) {
                     fat.toDoubleOrNull()?.let { map["fat_g"] = it }
                     vm.saveTargets(map)
                 },
+                enabled = !busy,
                 modifier = Modifier.fillMaxWidth().height(44.dp),
                 shape = RoundedCornerShape(Radii.sm),
                 colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
             ) {
-                Text("保存手动目标", color = Palette.OnAccent, fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (busy) "保存中…" else "保存手动目标",
+                    color = Palette.OnAccent,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
         }
     }

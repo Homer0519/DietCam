@@ -25,6 +25,36 @@ import java.util.concurrent.TimeUnit
 private const val SWEEP_MIN_AGE_MS = 60_000L
 
 /**
+ * 从 SSE 的一行里取出增量文本；不是「有内容」的行就返回 null。
+ *
+ * 抽成纯函数是为了能在 JVM 自检里直接验证 —— 这里踩过一个很坑的雷：
+ * 推理类模型常先发 `{"choices":[{"delta":{"content":null,"reasoning_content":"…"}}]}`，
+ * 而 org.json 的 `optString("content")` 遇到 JSON null 返回的是**字符串 "null"**（不是空串），
+ * 于是界面上会滚出一整屏 "null"。真机截图就是这么来的。
+ */
+internal fun parseStreamLine(line: String): String? {
+    if (line.isBlank() || !line.startsWith("data:")) return null
+    val chunk = line.substring(5).trim()
+    if (chunk.isEmpty() || chunk == "[DONE]") return null
+    val obj = runCatching { JSONObject(chunk) }.getOrNull() ?: return null
+    val choices = obj.optJSONArray("choices") ?: return null
+    if (choices.length() == 0) return null
+    val delta = choices.optJSONObject(0)?.optJSONObject("delta") ?: return null
+    if (delta.isNull("content")) return null
+    val piece = delta.optString("content", "")
+    return piece.takeIf { it.isNotEmpty() && it != "null" }
+}
+
+/** 有的服务端不认 stream=true，直接回一个完整的 chat.completion —— 从原始响应体里兜一次。 */
+internal fun parseWholeBody(raw: String): String? {
+    val choices = runCatching { JSONObject(raw).optJSONArray("choices") }.getOrNull() ?: return null
+    val message = choices.optJSONObject(0)?.optJSONObject("message") ?: return null
+    if (message.isNull("content")) return null
+    val text = message.optString("content", "")
+    return text.takeIf { it.isNotEmpty() && it != "null" }
+}
+
+/**
  * 把 [updates] 合并进当前生效的目标 [base]，只覆盖调用方真正传进来的键。
  *
  * 故意写成纯 Kotlin、不碰 JSONObject —— 这样 JVM 单元测试可以直接验证它。
@@ -643,6 +673,7 @@ class LocalDietApi(
             .build()
 
         val text = StringBuilder()
+        val rawBody = StringBuilder()
         modelClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 val body = runCatching { response.body?.string() }.getOrNull() ?: ""
@@ -651,20 +682,21 @@ class LocalDietApi(
             val source = response.body?.source() ?: throw DietApiException("模型没有返回内容")
             while (true) {
                 val line = source.readUtf8Line() ?: break
-                if (line.isBlank() || !line.startsWith("data:")) continue
-                val chunk = line.substring(5).trim()
-                if (chunk == "[DONE]") break
-                val obj = runCatching { JSONObject(chunk) }.getOrNull() ?: continue
-                val choices = obj.optJSONArray("choices") ?: continue
-                if (choices.length() == 0) continue
-                val delta = choices.optJSONObject(0)?.optJSONObject("delta") ?: continue
-                val piece = delta.optString("content", "")
-                if (piece.isEmpty()) continue
+                rawBody.append(line).append('\n')
+                if (line.startsWith("data:") && line.substring(5).trim() == "[DONE]") break
+                val piece = parseStreamLine(line) ?: continue
                 text.append(piece)
                 onDelta(piece)
             }
         }
-        if (text.isEmpty()) throw DietApiException("模型没有返回内容")
+        if (text.isEmpty()) {
+            // 少数服务端根本不认 stream=true，会回一个完整 JSON —— 再兜一次
+            parseWholeBody(rawBody.toString())?.let { whole ->
+                onDelta(whole)
+                return whole
+            }
+            throw DietApiException("模型没有返回内容")
+        }
         return text.toString()
     }
 
