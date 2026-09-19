@@ -31,13 +31,28 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
+      - name: Prepare Android SDK
+        # 不用 android-actions/setup-android@v3：它会把 runner 预装的 cmdline-tools
+        # 判成 "Wrong version in preinstalled sdkmanager"，然后去跑一个在新版
+        # cmdline-tools 里已经被移除的 `sdkmanager tools`，整步直接失败
+        # （2026-09-19 起 ubuntu-latest 镜像上必现，与我们自己的代码无关）。
+        #
+        # ubuntu-latest 本来就带 Android SDK，这里只补上真正需要的两个包，
+        # 并且把路径显式写进环境变量，免得 AGP 找不到。
+        working-directory: .
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "SDK = $SDK"
+          SDKMGR="$(find "$SDK/cmdline-tools" -maxdepth 3 -name sdkmanager -type f 2>/dev/null | head -n 1)"
+          echo "sdkmanager = $SDKMGR"
+          if [ -n "$SDKMGR" ]; then
+            yes | "$SDKMGR" --sdk_root="$SDK" --licenses > /dev/null 2>&1 || true
+            "$SDKMGR" --sdk_root="$SDK" "platform-tools" "platforms;android-35" "build-tools;35.0.0" || true
+          fi
+          echo "--- 已装平台 ---"; ls "$SDK/platforms" 2>/dev/null || true
+          echo "--- 已装 build-tools ---"; ls "$SDK/build-tools" 2>/dev/null || true
 
       - name: Prepare signing config
         # 签名材料不在仓库里（密钥库与口令都已被 .gitignore 排除）。
@@ -61,10 +76,11 @@ jobs:
 
       - name: Verify signature
         run: |
-          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
           echo "产物: $APK"
-          if command -v apksigner >/dev/null 2>&1; then
-            apksigner verify --print-certs "$APK" | head -n 3
+          BT="$(ls -d "${ANDROID_SDK_ROOT}/build-tools/"*/ 2>/dev/null | tail -n 1)"
+          if [ -n "$BT" ] && [ -x "${BT}apksigner" ]; then
+            "${BT}apksigner" verify --print-certs "$APK" | head -n 3
           fi
 
       - name: Show build outputs
