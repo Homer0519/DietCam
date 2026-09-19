@@ -214,7 +214,7 @@ git commit -m "chore: 签名口令移出版本库"
 
 不是"写完就交"，下面这些是实际跑出来的结果：
 
-**AstrBot 插件 — 295 项测试全部通过**
+**AstrBot 插件 — 296 项测试全部通过**
 
 ```bash
 python tools/run_all_checks.py      # 一键跑完下面全部检查
@@ -222,7 +222,7 @@ python tools/run_all_checks.py      # 一键跑完下面全部检查
 
 | 检查 | 说明 |
 | --- | --- |
-| `tools/plugin_selftest.py` | 295 项单元 + 端到端测试 |
+| `tools/plugin_selftest.py` | 296 项单元 + 端到端测试 |
 | `tools/verify_regression.py` | 验证测试本身有效（能区分修复前后） |
 | `tools/demo_plugin.py` | 端到端演示，兼作冒烟测试 |
 
@@ -297,29 +297,29 @@ python tools/demo_plugin.py
 **Android 端 — 真实编译出包**
 
 ```
-BUILD SUCCESSFUL in 5m 9s
-50 actionable tasks: 8 executed, 42 up-to-date
+BUILD SUCCESSFUL in 1m 29s
+50 actionable tasks: 37 executed, 12 from cache, 1 up-to-date
 ```
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-2.6.2-release.apk`（12.44 MB） |
-| 包名 / 版本 | `com.dietcam.app` v2.6.2 (versionCode 13) |
+| 产物 | `dist/DietCam-2.6.3-release.apk`（12.44 MB） |
+| 包名 / 版本 | `com.dietcam.app` v2.6.3 (versionCode 14) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE（+ API≤28 的 WRITE_EXTERNAL_STORAGE） |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
 | 签名 | 固定 release 证书 `CN=DietCam`（非 debug） |
 | 签名方案 | `apksigner verify` 通过，证书与历史包完全一致 |
 | 证书指纹 | `d76d49a7c17063e669ca289e7f24f5efe7d2274adb0eaa899aff9ba1048b5c26`（跨构建稳定） |
-| SHA-256 | `6AD851E0F2DCA38F1A22279B98C52AF8E1E4E047B8FF928E841A0D62FB082C5F` |
+| SHA-256 | `ED1BFE5274C58995D4FD390ECCBC6BC4C8131533278235662ED2D76CF806D378` |
 
 **升级路径实测** —— 每次发版都由 `bump_version.py` 递增 versionCode 后构建，
 证书指纹始终是上面那一串：
 
-| | 1.0.0 | 2.6.2 |
+| | 1.0.0 | 2.6.3 |
 | --- | --- | --- |
 | applicationId | `com.dietcam.app` | `com.dietcam.app` ✅ 一致 |
-| versionCode | 1 | 13 ✅ 更大 |
+| versionCode | 1 | 14 ✅ 更大 |
 | 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d76d49a7…` ✅ 完全一致 |
 
 三个条件同时满足，因此新包会被系统识别为**升级**而不是新装。
@@ -327,10 +327,21 @@ BUILD SUCCESSFUL in 5m 9s
 工具链：Gradle 8.11.1 + AGP 8.7.3 + Kotlin 2.1.0 + Compose BOM 2024.12.01。
 本地构建用 JDK 21，GitHub Actions 用 JDK 17（`tools/build_android.ps1` 接受 JDK 17 及以上），两者编出的包完全一致。
 
-Android 端还有一组 JVM 单元测试（不需要模拟器）：
+**本地模式数据层自检 —— 在电脑上跑真实的 LocalDietApi**
 
 ```bash
-pwsh -File tools/build_android.ps1 -Task testReleaseUnitTest
+pwsh -File tools/jvmcheck/run.ps1
 ```
 
-守着「本地模式手动改目标」的合并语义——只填热量时不能把蛋白/碳水/脂肪清成 0。
+本地模式（不连 AstrBot）只有真机能点，出问题之前只能靠猜。`tools/jvmcheck/` 给
+`android.content / graphics / util` 补了**最小**桩（多一个成员都不加，免得掩盖真机差异），
+于是真实的 `LocalDietApi.kt` 可以在普通 JVM 上编译并运行，把
+「存档案 → 重算目标 → 首页汇总 / 日历 / 历史 → 编辑删除」整条路跑一遍 —— 48 项断言。
+
+它绕开了 Gradle 的 `test` 任务：那个会 fork 测试 JVM 走本地 socket，
+在受限环境里会挂住；这里直接调 kotlinc + java。另有 `TargetsMergeTest`
+（`tools/build_android.ps1 -Task testReleaseUnitTest`）守着目标合并语义。
+
+`tools/jvmcheck/LocalModeCheck.kt` 与 `tools/plugin_selftest.py` 里各有一组
+**锚点断言，钉的是同一组数值**（180cm/80kg/35岁/中度/减脂 → 2176.2 千卡、
+蛋白 136 g、碳水 272 g）——保证 Kotlin 与 Python 两份 `compute_targets` 不会各算各的。

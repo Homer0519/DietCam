@@ -404,7 +404,8 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _busy.value = true
         viewModelScope.launch {
             try {
-                val json = dietBackend(getApplication<Application>(), current).saveProfile(
+                val backend = dietBackend(getApplication<Application>(), current)
+                val json = backend.saveProfile(
                     mapOf(
                         "height_cm" to profile.heightCm,
                         "weight_kg" to profile.weightKg,
@@ -415,12 +416,29 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 )
                 _profile.value = ProfileParse.info(json)
+
+                // 回读一次。以前只看「写接口返回了什么」——万一没落盘，
+                // 弹窗照样说成功，用户只看到「填了没用、按了没反应」。
+                // 现在把真正读回来的值摆出来，写没写进去一目了然。
+                val reread = runCatching { backend.profile() }.getOrNull()
+                    ?.let { ProfileParse.info(it) }
+                if (reread != null) _profile.value = reread
+                val shown = reread ?: ProfileParse.info(json)
+                val stored = shown.profile
+                val t = shown.targets
+
                 _notice.value = Notice(
-                    "目标已按新档案重算",
-                    "每日 " + json.optJSONObject("targets")?.optDouble("calories_kcal", 0.0)
-                        ?.toInt().toString() + " 千卡\n" +
-                        "蛋白质 " + json.optJSONObject("targets")?.optDouble("protein_g", 0.0)
-                        ?.toInt().toString() + " g",
+                    "档案已保存 ✅",
+                    buildString {
+                        append("已存入：" + stored.heightCm.roundToInt() + " cm / " +
+                            stored.weightKg.roundToInt() + " kg / " + stored.age + " 岁\n")
+                        append("每日目标：" + t.kcal.roundToInt() + " 千卡\n")
+                        append("蛋白 " + t.protein.roundToInt() + " g · 碳水 " +
+                            t.carbs.roundToInt() + " g · 脂肪 " + t.fat.roundToInt() + " g\n")
+                        if (t.kcal <= 0.0) {
+                            append("\n⚠️ 目标还是 0，说明没算出来，请点「本地模式自检」看看。")
+                        }
+                    },
                 )
                 refreshHome()
                 onDone()
@@ -429,6 +447,48 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 _busy.value = false
             }
+        }
+    }
+
+    /**
+     * 本地模式自检：把「设置存了没 / 后端能不能起来 / 档案和目标是什么」一次报清楚。
+     *
+     * 加它的原因很直接 —— 本地模式只有在真机上才能点，出问题时看不到任何内部状态，
+     * 只能来回猜。这个按钮不改任何数据，只读。
+     */
+    fun localSelfCheck() {
+        val current = store.snapshot()
+        _notice.value = Notice("自检中…", "正在读取…")
+        viewModelScope.launch {
+            val lines = mutableListOf<String>()
+            lines += "运行方式：" + (if (current.localMode) "本地模式（不依赖 AstrBot）" else "连 AstrBot")
+            lines += "配置是否齐全：" + if (store.isConfigured()) "是" else "否 ← 这一项为否则按钮会没反应"
+            if (current.localMode) {
+                lines += "模型地址：" + current.modelBaseUrl.ifBlank { "(空)" }
+                lines += "模型名称：" + current.modelName.ifBlank { "(空)" }
+                lines += "模型 Key：" + if (current.modelApiKey.isBlank()) "(空)" else "已填"
+            } else {
+                lines += "服务器地址：" + current.baseUrl.ifBlank { "(空)" }
+                lines += "签名密钥：" + if (current.secret.isBlank()) "(空)" else "已填"
+            }
+            try {
+                val backend = dietBackend(getApplication<Application>(), current)
+                val health = backend.health()
+                lines += "数据目录：" + health.optString("data_dir", "?")
+                val info = ProfileParse.info(backend.profile())
+                lines += "已存档案：" + info.profile.heightCm.roundToInt() + " cm / " +
+                    info.profile.weightKg.roundToInt() + " kg / " + info.profile.age + " 岁"
+                lines += "目标来源：" + info.mode
+                lines += "当前目标：" + info.targets.kcal.roundToInt() + " 千卡（蛋白 " +
+                    info.targets.protein.roundToInt() + " g）"
+                val today = backend.summary(null)
+                lines += "今日汇总：" + today.optJSONObject("totals")
+                    ?.optDouble("calories_kcal", 0.0)?.toInt() + " 千卡 / " +
+                    today.optInt("count") + " 条"
+            } catch (e: Exception) {
+                lines += "读取失败：" + DietApi.friendlyMessage(e)
+            }
+            _notice.value = Notice("本地模式自检", lines.joinToString("\n"))
         }
     }
 

@@ -182,6 +182,7 @@ private fun DietCamApp(vm: DietViewModel) {
                 showSettings = false
             },
             onTest = { settings -> vm.testConnection(settings) },
+            onSelfCheck = { vm.localSelfCheck() },
         )
     }
 
@@ -241,6 +242,7 @@ private fun SettingsDialog(
     onDismiss: () -> Unit,
     onSave: (DietSettings) -> Unit,
     onTest: (DietSettings) -> Unit,
+    onSelfCheck: () -> Unit,
     models: ModelPickState?,
     onFetchModels: (DietSettings) -> Unit,
     onCloseModels: () -> Unit,
@@ -314,8 +316,13 @@ private fun SettingsDialog(
                         Spacer(Modifier.height(6.dp))
                     }
                     Spacer(Modifier.height(6.dp))
-                    TextButton(onClick = { onTest(collected()) }) {
-                        Text("测试连接", color = Palette.Accent)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { onTest(collected()) }) {
+                            Text("测试连接", color = Palette.Accent)
+                        }
+                        TextButton(onClick = onSelfCheck) {
+                            Text("自检（看看存到哪了）", color = Palette.TextSecondary, fontSize = 13.sp)
+                        }
                     }
                     Spacer(Modifier.height(8.dp))
                     HintBox(

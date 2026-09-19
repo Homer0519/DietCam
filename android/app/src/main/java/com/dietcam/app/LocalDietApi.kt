@@ -208,37 +208,24 @@ class LocalDietApi(
     // ------------------------------------------------------------ 接口
 
     override suspend fun health(): JSONObject = withContext(Dispatchers.IO) {
-        // 「测试连接」会把 data_dir 显示出来，以前这里返回空对象，本地模式下
-        // 那一行永远是「数据目录：?」。
+        // 本地模式的「测试连接」不联网，只回报数据目录与能力开关 ——
+        // 以前这里返回空对象，那一行永远是「数据目录：?」。
         JSONObject()
             .put("ok", true)
             .put("plugin", "dietcam-local")
             .put("local", true)
+            .put("version", "本地模式")
             .put("data_dir", root.absolutePath)
             .put(
                 "features",
-                JSONObject().put("stream", true).put("profile", true).put("calendar", true)
-                    .put("history", true).put("record_edit", true).put("record_delete", true)
-                    .put("record_reanalyze", true).put("text", true),
+                JSONObject()
+                    .put("stream", true).put("summary", true).put("targets", true)
+                    .put("profile", true).put("record_edit", true).put("record_delete", true)
+                    .put("record_reanalyze", true).put("calendar", true).put("history", true)
+                    .put("text", true).put("archive", false),
             )
+            .put("targets", targetsOf())
     }
-        .put("ok", true)
-        .put("plugin", "local")
-        .put("version", "本地模式")
-        .put("data_dir", root.absolutePath)
-        .put("features", JSONObject()
-            .put("stream", true)
-            .put("summary", true)
-            .put("targets", true)
-            .put("profile", true)
-            .put("record_edit", true)
-            .put("record_delete", true)
-            .put("record_reanalyze", true)
-            .put("calendar", true)
-            .put("history", true)
-            .put("text", true)
-            .put("archive", false))
-        .put("targets", targetsOf())
 
     override suspend fun summary(date: String?): JSONObject = withContext(Dispatchers.IO) {
         val day = date?.takeIf { it.isNotBlank() } ?: dateOf(calendarOf())
@@ -351,6 +338,8 @@ class LocalDietApi(
         end?.takeIf { it.isNotBlank() }?.let { text ->
             runCatching { SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(text) }.getOrNull()?.let { cal.time = it }
         }
+        // 先把 end 记下来：下面这个循环会把 cal 一路往前推
+        val endDay = dateOf(cal)
         val wanted = LinkedHashSet<String>()
         for (i in 0 until span) {
             wanted.add(dateOf(cal))
@@ -376,9 +365,14 @@ class LocalDietApi(
         }
         all.sortWith(compareByDescending<JSONObject> { it.optString("date") }.thenByDescending { it.optString("time") })
 
+        // 字段与插件 /history 对齐：少一个字段，上层就会出现「本地有、服务器没有」
+        // 那种只在一种模式下发作的怪毛病。
         JSONObject()
             .put("ok", true)
+            .put("end", endDay)
             .put("days", span)
+            .put("count", all.size)
+            .put("targets", targetsOf())
             .put("records", JSONArray(all))
             .put("per_day", perDay)
     }

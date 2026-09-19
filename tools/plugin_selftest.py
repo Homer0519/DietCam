@@ -636,6 +636,15 @@ check("减脂目标低于维持",
                              "activity": "light", "goal": "lose"})["calories_kcal"]
       < calc["calories_kcal"])
 
+# 两端一致性锚点：本地模式的 Kotlin 实现（android .../LocalDietApi.computeTargets）
+# 与插件这份必须算出同一个数，否则同一个界面换个后端就给出不同目标。
+# 对应的断言在 tools/jvmcheck/LocalModeCheck.kt 里也有一份，两边钉的是同一个数。
+PINNED = module.compute_targets({"height_cm": 180, "weight_kg": 80, "age": 35,
+                                 "sex": "male", "activity": "moderate", "goal": "lose"})
+check("锚点 · 180cm/80kg/35岁/中度/减脂 = 2176.2 千卡",
+      abs(PINNED["calories_kcal"] - 2176.2) < 0.5, PINNED["calories_kcal"])
+check("锚点 · 蛋白 136.0 g", abs(PINNED["protein_g"] - 136.0) < 0.5, PINNED["protein_g"])
+
 make_request(payload={"height_cm": 180, "weight_kg": 80, "age": 25,
                       "sex": "male", "activity": "moderate", "goal": "lose"})
 resp = call("/profile", "POST")
