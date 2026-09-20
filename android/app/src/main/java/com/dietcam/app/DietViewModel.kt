@@ -186,11 +186,8 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
             when {
                 outcome.info != null -> _update.value = outcome.info
                 !manual -> Unit
-                outcome.error != null -> _notice.value = Notice("检查更新失败", outcome.error)
-                else -> _notice.value = Notice(
-                    "已是最新版本",
-                    "当前 " + current + "，GitHub 上最新是 " + (outcome.latest ?: "?") + "。",
-                )
+                outcome.error != null -> _notice.value = Notice("检查更新失败", outcome.error + "，稍后再试。")
+                else -> _notice.value = Notice("已是最新版本", "当前 " + current)
             }
         }
     }
@@ -203,15 +200,11 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
     fun downloadUpdate() {
         val info = _update.value ?: return
         _update.value = null
-        val started = info.apkUrl.isNotBlank() && ApkDownloader.start(getApplication(), info)
+        val started = ApkDownloader.start(getApplication(), info)
         _notice.value = if (started) {
-            Notice(
-                "已开始下载",
-                "DietCam " + info.version + " 正在后台下载（存到「下载」目录）。\n" +
-                    "下完点通知栏里的那一项就能安装。",
-            )
+            Notice("已开始下载", "下完点通知栏里的那一项就能安装。")
         } else {
-            Notice("请手动下载", "打开发布页复制链接下载：\n" + info.pageUrl)
+            Notice("请手动下载", UpdateChecker.PAGE_URL)
         }
     }
 

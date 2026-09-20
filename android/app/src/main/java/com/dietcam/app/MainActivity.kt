@@ -334,19 +334,17 @@ private fun UpdateDialog(
                     .verticalScroll(rememberScrollState()),
             ) {
                 Text(
-                    "当前版本 " + current,
+                    "当前版本 " + current + " → 新版本 " + info.version,
+                    color = Palette.TextSecondary,
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "下载会在后台进行，完成后点通知栏里的那一项即可安装。",
                     color = Palette.TextTertiary,
                     fontSize = 12.sp,
+                    lineHeight = 18.sp,
                 )
-                if (info.notes.isNotBlank()) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        info.notes,
-                        color = Palette.TextSecondary,
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                    )
-                }
             }
         },
         confirmButton = {

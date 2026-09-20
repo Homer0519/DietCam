@@ -8,52 +8,57 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
-/** 一次更新检查的结果。 */
+/** 有新版时带出来的信息。 */
 data class UpdateInfo(
     val version: String,
-    val notes: String,
+    /** 永远指向最新版 APK 的固定直链。 */
     val apkUrl: String,
+    /** 给人看的发布页。 */
     val pageUrl: String,
 )
 
-/**
- * 一次检查的完整结果 —— 关键是**区分「确实没有新版」和「根本没查成」**。
- *
- * 以前只返回「有新版 / null」，于是网络不通、被限流、仓库没公开，全都表现成
- * 「已是最新版本」。用户看到的提示是错的，我也没法从截图里判断问题在哪。
- */
+/** 一次检查的结果：有新版 / 已是最新 / 查失败，三种分开。 */
 data class UpdateOutcome(
-    /** 有新版时才非空。 */
     val info: UpdateInfo? = null,
-    /** GitHub 上看到的最新版本号（查到过就有值）。 */
+    /** GitHub 上看到的最新版本号（查到了就有）。 */
     val latest: String? = null,
-    /** 查询失败的原因；为 null 表示这次查询是成功的。 */
+    /** 失败原因；null 表示这次查成功了。 */
     val error: String? = null,
 )
 
 /**
- * 从 GitHub Release 上查有没有新版本。
+ * 检查 GitHub 上有没有新版本 —— **只用一条路，不碰 API**。
  *
- * 前提是仓库公开：私有仓库的 releases 接口要带 token，而 token 不能塞进 APK 里。
+ * `github.com/<owner>/<repo>/releases/latest` 会 302 到 `.../tag/vX.Y.Z`，
+ * 从最终地址里就能读出最新版本号。一次请求，不需要 token，**也不吃那 60 次/小时的匿名限流**
+ * （限流是 REST API 的规则，文件与网页不受它管）。
  *
- * 两条路：
- *  1. api.github.com 的 releases/latest —— 信息最全（更新说明、APK 直链），
- *     但有 60 次/小时的匿名限流；
- *  2. github.com/.../releases/latest 的 302 —— 不限额流，但只有版本号。
- * 第一条不通就退到第二条：国内网络/限流下第二条往往还能用。
+ * 以前这里先打 API、失败再退网页，两套逻辑两套错误文案 —— 对一个自用/小范围分发的
+ * App 来说纯属自找麻烦。现在只有一条路。
  */
 object UpdateChecker {
 
     private const val OWNER = "Homer0519"
     private const val REPO = "DietCam"
     private const val USER_AGENT = "DietCam-Android"
-    private const val API_LATEST = "https://api.github.com/repos/" + OWNER + "/" + REPO + "/releases/latest"
+
+    /** 访问它会 302 到最新版的 tag 页。 */
     private const val WEB_LATEST = "https://github.com/" + OWNER + "/" + REPO + "/releases/latest"
+
+    /**
+     * **永远指向最新版 APK** 的固定直链，可以直接发出去 / 印二维码。
+     *
+     * 原理：GitHub 的 `releases/latest/download/<文件名>` 一直转发到最新那个 release 的同名文件。
+     * 所以每次发布只要多传一个固定名 `DietCam.apk`，这条地址就永远不用改。
+     */
+    const val APK_URL = "https://github.com/" + OWNER + "/" + REPO + "/releases/latest/download/DietCam.apk"
+
+    /** 发布页（浏览器打开，能看历史版本和更新说明）。 */
+    const val PAGE_URL = "https://github.com/" + OWNER + "/" + REPO + "/releases/latest"
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -64,99 +69,31 @@ object UpdateChecker {
     }
 
     suspend fun check(currentVersion: String): UpdateOutcome = withContext(Dispatchers.IO) {
-        val first = runCatching { viaApi(currentVersion) }
-            .getOrElse { UpdateOutcome(error = describe(it)) }
-        if (first.error == null) return@withContext first
-
-        // API 不通（限流 / 被墙）时退一步，走网页重定向
-        val second = runCatching { viaRedirect(currentVersion) }
-            .getOrElse { UpdateOutcome(error = describe(it)) }
-        if (second.error == null) return@withContext second
-
-        // 两条都不通，把第一条的原因报出去（通常更有信息量）
-        first
-    }
-
-    /** 走 API：能拿到更新说明和 APK 直链。 */
-    private fun viaApi(currentVersion: String): UpdateOutcome {
-        val request = Request.Builder()
-            .url(API_LATEST)
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", USER_AGENT)
-            .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                return UpdateOutcome(error = httpError(response.code))
-            }
-            val body = response.body?.string().orEmpty()
-            val json = runCatching { JSONObject(body) }.getOrNull()
-                ?: return UpdateOutcome(error = "返回内容不是 JSON")
-            val version = json.optString("tag_name").trim().trimStart('v', 'V')
-            if (version.isBlank()) return UpdateOutcome(error = "返回里没有 tag_name")
-
-            var apkUrl = ""
-            val assets = json.optJSONArray("assets")
-            if (assets != null) {
-                for (i in 0 until assets.length()) {
-                    val item = assets.optJSONObject(i) ?: continue
-                    if (item.optString("name").endsWith(".apk", ignoreCase = true)) {
-                        apkUrl = item.optString("browser_download_url")
-                        break
-                    }
+        runCatching {
+            val request = Request.Builder()
+                .url(WEB_LATEST)
+                .header("User-Agent", USER_AGENT)
+                .build()
+            client.newCall(request).execute().use { response ->
+                val version = versionFromReleaseUrl(response.request.url.toString())
+                if (version == null) {
+                    UpdateOutcome(error = if (response.isSuccessful) "跳转地址里没有版本号" else "GitHub 返回 HTTP " + response.code)
+                } else if (!isNewerVersion(version, currentVersion)) {
+                    UpdateOutcome(latest = version)
+                } else {
+                    UpdateOutcome(
+                        info = UpdateInfo(version = version, apkUrl = APK_URL, pageUrl = PAGE_URL),
+                        latest = version,
+                    )
                 }
             }
-            if (!isNewerVersion(version, currentVersion)) {
-                return UpdateOutcome(latest = version)
-            }
-            return UpdateOutcome(
-                info = UpdateInfo(
-                    version = version,
-                    notes = json.optString("body").trim(),
-                    apkUrl = apkUrl,
-                    pageUrl = json.optString("html_url"),
-                ),
-                latest = version,
-            )
-        }
-    }
-
-    /**
-     * 走网页：`github.com/.../releases/latest` 会 302 到 `.../tag/vX.Y.Z`，
-     * 从最终地址里就能读出最新版本号。不限额流。
-     */
-    private fun viaRedirect(currentVersion: String): UpdateOutcome {
-        val request = Request.Builder().url(WEB_LATEST).header("User-Agent", USER_AGENT).build()
-        client.newCall(request).execute().use { response ->
-            val finalUrl = response.request.url.toString()
-            val version = versionFromReleaseUrl(finalUrl)
-                ?: return UpdateOutcome(error = httpError(response.code))
-            if (!isNewerVersion(version, currentVersion)) {
-                return UpdateOutcome(latest = version)
-            }
-            val tag = "v" + version
-            return UpdateOutcome(
-                info = UpdateInfo(
-                    version = version,
-                    notes = "",
-                    apkUrl = "https://github.com/" + OWNER + "/" + REPO +
-                        "/releases/download/" + tag + "/DietCam-" + version + "-release.apk",
-                    pageUrl = finalUrl,
-                ),
-                latest = version,
-            )
-        }
-    }
-
-    private fun httpError(code: Int): String = when (code) {
-        403 -> "GitHub 接口限流了（HTTP 403），过一会儿再试"
-        404 -> "仓库或 Release 不存在（HTTP 404）"
-        else -> "GitHub 返回 HTTP " + code
+        }.getOrElse { UpdateOutcome(error = describe(it)) }
     }
 
     private fun describe(e: Throwable): String = when (e) {
-        is UnknownHostException -> "网络不通：解析不了 github.com（可能需要代理）"
-        is SocketTimeoutException -> "连接 GitHub 超时"
-        else -> e.message ?: e.javaClass.simpleName
+        is UnknownHostException -> "网络不通"
+        is SocketTimeoutException -> "连接超时"
+        else -> e.message ?: "未知错误"
     }
 }
 
@@ -164,15 +101,14 @@ object UpdateChecker {
 object ApkDownloader {
 
     /**
-     * 交给系统的 DownloadManager：它自带进度通知，下完点通知就能装，
-     * 不需要我们申请「安装未知应用」权限，也不用 FileProvider。
-     * 本方法只负责入队，不关心结果。
+     * 交给系统的 DownloadManager：自带进度通知，下完点通知就能装，
+     * 不需要「安装未知应用」权限，也不用 FileProvider。
      */
     fun start(context: Context, info: UpdateInfo): Boolean {
-        if (info.apkUrl.isBlank()) return false
+        val url = info.apkUrl.ifBlank { UpdateChecker.APK_URL }
         return runCatching {
             val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            val request = DownloadManager.Request(Uri.parse(info.apkUrl))
+            val request = DownloadManager.Request(Uri.parse(url))
                 .setTitle("DietCam " + info.version)
                 .setDescription("正在下载新版本")
                 .setMimeType("application/vnd.android.package-archive")
