@@ -320,8 +320,8 @@ BUILD SUCCESSFUL in 49s
 
 | 项目 | 结果 |
 | --- | --- |
-| 产物 | `dist/DietCam-2.7.2-release.apk`（12.5 MB） |
-| 包名 / 版本 | `com.dietcam.app` v2.7.2 (versionCode 18) |
+| 产物 | `dist/DietCam-2.7.3-release.apk`（12.5 MB） |
+| 包名 / 版本 | `com.dietcam.app` v2.7.3 (versionCode 19) |
 | SDK | minSdk 26，targetSdk 35，compileSdk 35 |
 | 权限 | CAMERA、INTERNET、ACCESS_NETWORK_STATE（+ API≤28 的 WRITE_EXTERNAL_STORAGE） |
 | 启动 Activity | `com.dietcam.app.MainActivity` |
@@ -333,10 +333,10 @@ BUILD SUCCESSFUL in 49s
 **升级路径实测** —— 每次发版都由 `bump_version.py` 递增 versionCode 后构建，
 证书指纹始终是上面那一串：
 
-| | 1.0.0 | 2.7.2 |
+| | 1.0.0 | 2.7.3 |
 | --- | --- | --- |
 | applicationId | `com.dietcam.app` | `com.dietcam.app` ✅ 一致 |
-| versionCode | 1 | 18 ✅ 更大 |
+| versionCode | 1 | 19 ✅ 更大 |
 | 签名证书 | `CN=DietCam` `d76d49a7…` | `CN=DietCam` `d76d49a7…` ✅ 完全一致 |
 
 三个条件同时满足，因此新包会被系统识别为**升级**而不是新装。
@@ -353,7 +353,7 @@ pwsh -File tools/jvmcheck/run.ps1
 本地模式（不连 AstrBot）只有真机能点，出问题之前只能靠猜。`tools/jvmcheck/` 给
 `android.content / graphics / util` 补了**最小**桩（多一个成员都不加，免得掩盖真机差异），
 于是真实的 `LocalDietApi.kt` 可以在普通 JVM 上编译并运行，把
-「存档案 → 重算目标 → 首页汇总 / 日历 / 历史 → 编辑删除 → 流式分片解析」整条路跑一遍 —— 81 项断言。
+「存档案 → 重算目标 → 首页汇总 / 日历 / 历史 → 编辑删除 → 流式分片解析」整条路跑一遍 —— 86 项断言。
 
 它绕开了 Gradle 的 `test` 任务：那个会 fork 测试 JVM 走本地 socket，
 在受限环境里会挂住；这里直接调 kotlinc + java。另有 `TargetsMergeTest`

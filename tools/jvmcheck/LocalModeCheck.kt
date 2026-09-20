@@ -7,6 +7,7 @@ import com.dietcam.app.isNewerVersion
 import com.dietcam.app.sanitizeKey
 import com.dietcam.app.sanitizeName
 import com.dietcam.app.sanitizeUrl
+import com.dietcam.app.versionFromReleaseUrl
 import com.dietcam.app.stripWhitespace
 import com.dietcam.app.parseStreamLine
 import com.dietcam.app.parseWholeBody
@@ -251,6 +252,14 @@ fun main() {
     val longKey = "user_" + "a".repeat(94) + "\n" + "tail"
     check("长 key 里的换行不会活到 header 里", !sanitizeKey(longKey).contains('\n'))
     check("清理后确实短了一个字符", sanitizeKey(longKey).length == longKey.length - 1)
+
+    section("15. 从 Release 网页重定向里读版本号（API 被限流时的备用路径）")
+    check("标准 tag 地址", versionFromReleaseUrl("https://github.com/Homer0519/DietCam/releases/tag/v2.7.3") == "2.7.3")
+    check("没有 v 前缀也行", versionFromReleaseUrl("https://github.com/o/r/releases/tag/2.7.3") == "2.7.3")
+    check("带查询串", versionFromReleaseUrl("https://github.com/o/r/releases/tag/v2.7.3?x=1") == "2.7.3")
+    check("没发生重定向时返回 null",
+        versionFromReleaseUrl("https://github.com/o/r/releases/latest") == null)
+    check("空串返回 null", versionFromReleaseUrl("") == null)
 
     section("11. 本地模式不再依赖 baseUrl / secret")
     check("baseUrl 是空的（这就是本地模式的样子）", settings.baseUrl.isBlank())

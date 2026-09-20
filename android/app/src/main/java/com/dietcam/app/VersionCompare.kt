@@ -17,6 +17,19 @@ internal fun isNewerVersion(candidate: String, current: String): Boolean {
     return false
 }
 
+/**
+ * 从 `https://github.com/o/r/releases/tag/v2.7.3` 里取出 `2.7.3`。
+ * 拿不到（比如根本没发生重定向）就返回 null。
+ *
+ * API 被限流时更新检查会退到网页重定向那条路，版本号就是从这里读出来的。
+ */
+internal fun versionFromReleaseUrl(url: String): String? {
+    val tag = url.substringAfterLast("/tag/", "")
+    if (tag.isBlank() || tag == url) return null
+    val version = tag.trim().trimStart('v', 'V').substringBefore('?')
+    return version.takeIf { it.isNotBlank() }
+}
+
 private fun versionParts(text: String): List<Int> =
     text.trim().removePrefix("v").removePrefix("V")
         // 预发布/构建元数据不参与比较：2.7.0-beta.1 就等于 2.7.0，

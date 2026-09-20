@@ -175,12 +175,22 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
     fun checkUpdate(manual: Boolean) {
         val current = BuildConfig.VERSION_NAME
         viewModelScope.launch {
-            val info = UpdateChecker.check(current)
-            store.lastUpdateCheck = System.currentTimeMillis()
-            if (info != null) {
-                _update.value = info
-            } else if (manual) {
-                _notice.value = Notice("已是最新版本", "当前 " + current + "，GitHub 上没有更新的发布。")
+            val outcome = UpdateChecker.check(current)
+
+            // 只有**真的查成功**才记账。以前失败也写时间戳，于是网络抖一下或者被
+            // 限流一次，接下来整整 24 小时都不再检查 —— 用户看到的就是「永远没有更新」。
+            if (outcome.error == null) {
+                store.lastUpdateCheck = System.currentTimeMillis()
+            }
+
+            when {
+                outcome.info != null -> _update.value = outcome.info
+                !manual -> Unit
+                outcome.error != null -> _notice.value = Notice("检查更新失败", outcome.error)
+                else -> _notice.value = Notice(
+                    "已是最新版本",
+                    "当前 " + current + "，GitHub 上最新是 " + (outcome.latest ?: "?") + "。",
+                )
             }
         }
     }
