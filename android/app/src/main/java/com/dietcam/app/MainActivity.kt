@@ -102,6 +102,8 @@ private fun DietCamApp(vm: DietViewModel) {
     val notice by vm.notice.collectAsStateWithLifecycle()
     val models by vm.models.collectAsStateWithLifecycle()
     val update by vm.update.collectAsStateWithLifecycle()
+    val askProfile by vm.askProfile.collectAsStateWithLifecycle()
+    val busy by vm.busy.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         if (!vm.isConfigured()) showSettings = true
@@ -205,6 +207,114 @@ private fun DietCamApp(vm: DietViewModel) {
             onLater = { vm.dismissUpdate() },
         )
     }
+
+    if (askProfile) {
+        ProfileSetupDialog(
+            busy = busy,
+            onSave = { profile ->
+                vm.saveProfile(profile) { vm.dismissAskProfile() }
+            },
+            onLater = { vm.dismissAskProfile() },
+        )
+    }
+}
+
+/**
+ * 第一次配置完连接后弹一次：先填身高体重，否则首页的「今日目标」算不出来。
+ * 活动量默认「轻度」，之后在「我的」页随时能改。
+ */
+@Composable
+private fun ProfileSetupDialog(
+    busy: Boolean,
+    onSave: (BodyProfile) -> Unit,
+    onLater: () -> Unit,
+) {
+    var height by remember { mutableStateOf("") }
+    var weight by remember { mutableStateOf("") }
+    var age by remember { mutableStateOf("") }
+    var sex by remember { mutableStateOf("male") }
+    var goal by remember { mutableStateOf("maintain") }
+
+    AlertDialog(
+        onDismissRequest = onLater,
+        title = { Text("填一下身体数据", fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(
+                Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    "用来按 Mifflin-St Jeor 公式推算每天的摄入目标。\n" +
+                        "填错也没关系，「我的」页随时能改；活动量先按「轻度」算。",
+                    color = Palette.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                Field(height, { height = it }, "身高 cm", "170")
+                Spacer(Modifier.height(10.dp))
+                Field(weight, { weight = it }, "体重 kg", "65")
+                Spacer(Modifier.height(10.dp))
+                Field(age, { age = it }, "年龄", "30")
+                Spacer(Modifier.height(14.dp))
+                Text("性别", color = Palette.TextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(Radii.sm))
+                        .background(Palette.SurfaceHigh),
+                ) {
+                    ModeChip("男", sex == "male", Modifier.weight(1f)) { sex = "male" }
+                    ModeChip("女", sex == "female", Modifier.weight(1f)) { sex = "female" }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text("目标", color = Palette.TextSecondary, fontSize = 12.sp)
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(Radii.sm))
+                        .background(Palette.SurfaceHigh),
+                ) {
+                    ModeChip("减脂", goal == "lose", Modifier.weight(1f)) { goal = "lose" }
+                    ModeChip("维持", goal == "maintain", Modifier.weight(1f)) { goal = "maintain" }
+                    ModeChip("增重", goal == "gain", Modifier.weight(1f)) { goal = "gain" }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSave(
+                        BodyProfile(
+                            heightCm = height.toDoubleOrNull() ?: 170.0,
+                            weightKg = weight.toDoubleOrNull() ?: 65.0,
+                            age = age.toIntOrNull() ?: 30,
+                            sex = sex,
+                            activity = "light",
+                            goal = goal,
+                        ),
+                    )
+                },
+                enabled = !busy,
+                shape = RoundedCornerShape(Radii.sm),
+                colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
+            ) {
+                Text(
+                    if (busy) "保存中…" else "保存",
+                    color = Palette.OnAccent,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onLater) {
+                Text("以后再说", color = Palette.TextSecondary)
+            }
+        },
+    )
 }
 
 @Composable

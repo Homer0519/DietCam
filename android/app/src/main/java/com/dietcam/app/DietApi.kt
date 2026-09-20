@@ -45,16 +45,17 @@ class DietApi(
 
     private fun token(): String {
         val exp = System.currentTimeMillis() / 1000L + 300L
-        return exp.toString() + "." + hmacSha256Hex(settings.secret, exp.toString())
+        return exp.toString() + "." + hmacSha256Hex(sanitizeKey(settings.secret), exp.toString())
     }
 
     private fun endpoint(path: String): String =
-        settings.baseUrl.trim().trimEnd('/') +
+        sanitizeUrl(settings.baseUrl).trimEnd('/') +
             "/api/v1/plugins/extensions/astrbot_plugin_diet" + path
 
     private fun newRequest(url: String): Request.Builder {
         val builder = Request.Builder().url(url).header("X-Diet-Token", token())
-        val key = settings.apiKey.trim()
+        // 用的时候再清一次：以前存坏的设置（key 里夹了换行）也会自愈
+        val key = sanitizeKey(settings.apiKey)
         if (key.isNotEmpty()) {
             builder.header("Authorization", "Bearer " + key)
         }
@@ -143,6 +144,24 @@ class DietApi(
         if (date.isBlank() || name.isBlank()) return null
         return File(dir, PhotoCache.key(date, name) + ".img")
     }
+
+    /**
+     * 把刚拍的照片直接写进磁盘缓存。
+     *
+     * 这样等会儿在记录详情里打开时，[photoBytes] 直接命中缓存，
+     * 不用再为同一张图往服务器拉一次。
+     */
+    override suspend fun cachePhoto(date: String, name: String, bytes: ByteArray): Unit =
+        withContext(Dispatchers.IO) {
+            val file = cachedPhoto(date, name) ?: return@withContext
+            if (bytes.isEmpty()) return@withContext
+            runCatching {
+                file.parentFile?.mkdirs()
+                file.writeBytes(bytes)
+                trimPhotoCache()
+            }
+            Unit
+        }
 
     /** 清空本地照片缓存（设置页的「清理缓存」用）。 */
     fun clearPhotoCache(): Long {

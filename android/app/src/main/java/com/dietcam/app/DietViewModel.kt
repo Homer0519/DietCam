@@ -100,6 +100,20 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         _configVersion.value = _configVersion.value + 1
         refreshHome()
         refreshProfile()
+        // 第一次配置好之后，引导填一次身高体重（只弹一次）——
+        // 不填的话首页的「今日目标」永远是 0，新用户会以为是坏的。
+        if (store.isConfigured() && !store.profilePrompted) {
+            _askProfile.value = true
+        }
+    }
+
+    private val _askProfile = MutableStateFlow(false)
+    val askProfile: StateFlow<Boolean> = _askProfile.asStateFlow()
+
+    /** 引导弹窗关掉了（存了或点了以后再说）：记为已引导，不再弹。 */
+    fun dismissAskProfile() {
+        _askProfile.value = false
+        store.profilePrompted = true
     }
 
     // ---------------------------------------------------- 本地模式：模型列表
@@ -381,6 +395,17 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
                 val record = call(api) { piece ->
                     buffer.append(piece)
                     _capture.value = CaptureUiState.Analyzing(buffer.toString())
+                }
+                // 刚拍的这张顺手塞进本地缓存：等会儿在记录详情里点开看大图时，
+                // 直接命中缓存，不用为同一张图再往服务器拉一次。
+                if (file != null) {
+                    runCatching {
+                        val date = record.optString("date")
+                        val name = record.optString("photo")
+                        if (date.isNotBlank() && name.isNotBlank()) {
+                            api.cachePhoto(date, name, file.readBytes())
+                        }
+                    }
                 }
                 _capture.value = CaptureUiState.Done(JsonParse.record(record))
                 refreshHome()

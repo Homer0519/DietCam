@@ -4,6 +4,10 @@ package jvmcheck
 import com.dietcam.app.DietSettings
 import com.dietcam.app.LocalDietApi
 import com.dietcam.app.isNewerVersion
+import com.dietcam.app.sanitizeKey
+import com.dietcam.app.sanitizeName
+import com.dietcam.app.sanitizeUrl
+import com.dietcam.app.stripWhitespace
 import com.dietcam.app.parseStreamLine
 import com.dietcam.app.parseWholeBody
 import kotlinx.coroutines.runBlocking
@@ -233,6 +237,20 @@ fun main() {
     check("预发布后缀只取数字部分", isNewerVersion("2.7.0-beta.1", "2.6.4"))
     check("预发布不比正式版新", !isNewerVersion("2.7.0-beta.1", "2.7.0"))
     check("空字符串不新", !isNewerVersion("", "2.6.4"))
+
+    section("14. 粘贴进来的 key/地址（真机上报 Unexpected char 0x0a 的那个）")
+    check("换行被删掉", stripWhitespace("sk-abc\ndef") == "sk-abcdef")
+    check("行尾换行被删掉", stripWhitespace("sk-abc\n") == "sk-abc")
+    check("中间的空格也被删掉", stripWhitespace("sk abc def") == "skabcdef")
+    check("制表符/回车一并处理", stripWhitespace("sk\tabc\rdef") == "skabcdef")
+    check("干净 key 原样返回", sanitizeKey("sk-1234567890") == "sk-1234567890")
+    check("多行粘贴的 key 变干净", sanitizeKey("  sk-abc\n  def  ") == "sk-abcdef")
+    check("地址里的换行被删掉", sanitizeUrl("https://api.example.com/v1\n") == "https://api.example.com/v1")
+    check("模型名只去首尾空白", sanitizeName("  qwen2.5-vl  ") == "qwen2.5-vl")
+    // 原始报错就是这个形状：换行正好落在 header 值的第 100 个字符处
+    val longKey = "user_" + "a".repeat(94) + "\n" + "tail"
+    check("长 key 里的换行不会活到 header 里", !sanitizeKey(longKey).contains('\n'))
+    check("清理后确实短了一个字符", sanitizeKey(longKey).length == longKey.length - 1)
 
     section("11. 本地模式不再依赖 baseUrl / secret")
     check("baseUrl 是空的（这就是本地模式的样子）", settings.baseUrl.isBlank())

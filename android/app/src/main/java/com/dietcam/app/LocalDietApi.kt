@@ -237,6 +237,13 @@ class LocalDietApi(
 
     // ------------------------------------------------------------ 接口
 
+    /**
+     * 本地模式下照片本来就存在手机里（`files/diet/photos/<日期>/`），
+     * 不存在「打开记录详情还要再拉一次」的问题，所以这里什么都不做 ——
+     * 只是为了满足两个后端一致的接口。
+     */
+    override suspend fun cachePhoto(date: String, name: String, bytes: ByteArray) = Unit
+
     override suspend fun health(): JSONObject = withContext(Dispatchers.IO) {
         // 本地模式的「测试连接」不联网，只回报数据目录与能力开关 ——
         // 以前这里返回空对象，那一行永远是「数据目录：?」。
@@ -649,9 +656,12 @@ class LocalDietApi(
         prompt: String,
         onDelta: (String) -> Unit,
     ): String {
-        val base = settings.modelBaseUrl.trim().trimEnd('/')
+        // 每次都清一遍：粘贴来的地址/key 常带换行，会让 OkHttp 直接抛
+        // Unexpected char 0x0a in Authorization value
+        val base = sanitizeUrl(settings.modelBaseUrl).trimEnd('/')
+        val modelName = sanitizeName(settings.modelName)
         if (base.isBlank()) throw DietApiException("请先在设置里填写模型接口地址")
-        if (settings.modelName.isBlank()) throw DietApiException("请先在设置里填写模型名称")
+        if (modelName.isBlank()) throw DietApiException("请先在设置里填写模型名称")
         val url = if (base.endsWith("/chat/completions")) base else base + "/chat/completions"
 
         val content = JSONArray().put(JSONObject().put("type", "text").put("text", prompt))
@@ -662,7 +672,7 @@ class LocalDietApi(
             )
         }
         val payload = JSONObject()
-            .put("model", settings.modelName.trim())
+            .put("model", modelName)
             .put("stream", true)
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
 
@@ -727,13 +737,13 @@ class LocalDietApi(
          * 以及 Ollama 那种 {"models":[{"name":...}]}。
          */
         suspend fun listModels(settings: DietSettings): List<String> = withContext(Dispatchers.IO) {
-            val base = settings.modelBaseUrl.trim().trimEnd('/')
+            val base = sanitizeUrl(settings.modelBaseUrl).trimEnd('/')
             if (base.isBlank()) throw DietApiException("请先填写模型接口地址")
             val url = if (base.endsWith("/models")) base else base + "/models"
 
             val request = Request.Builder()
                 .url(url)
-                .header("Authorization", "Bearer " + settings.modelApiKey.trim())
+                .header("Authorization", "Bearer " + sanitizeKey(settings.modelApiKey))
                 .get()
                 .build()
 

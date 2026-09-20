@@ -29,6 +29,12 @@ interface DietBackend {
 
     suspend fun photoBytes(date: String, name: String): ByteArray
 
+    /**
+     * 把一张本地已有的照片塞进缓存（刚拍完就顺手存一份）。
+     * 本地模式下照片本来就在手机上，实现为空。
+     */
+    suspend fun cachePhoto(date: String, name: String, bytes: ByteArray)
+
     suspend fun profile(): JSONObject
 
     suspend fun saveProfile(fields: Map<String, Any>): JSONObject
