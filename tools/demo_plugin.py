@@ -180,7 +180,7 @@ async def main() -> int:
 
     plugin._analyze_openai = fake_analyze
 
-    async def fake_stream(path, note):
+    async def fake_stream(path, note, exercise=False):
         """模拟真实的流式输出：先来一句观察，再逐段吐 JSON。"""
         item = next_item(note)
         observation = "盘中是%s，整体%s。" % (

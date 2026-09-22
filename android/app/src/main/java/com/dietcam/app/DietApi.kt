@@ -206,6 +206,36 @@ class DietApi(
         }
     }
 
+    /** 流式记录一次运动。 */
+    override suspend fun analyzeExerciseStream(
+        text: String,
+        onDelta: (String) -> Unit,
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("text", text)
+        val request = newRequest(endpoint("/exercise_stream")).post(jsonBody(body)).build()
+        try {
+            readSse(request, onDelta)
+        } catch (e: DietApiException) {
+            if (e.serverMessage == NO_STREAM) {
+                // 旧版插件没有运动接口时，退回一次性
+                recordOf(executeSync(newRequest(endpoint("/exercise")).post(jsonBody(body)).build()))
+            } else {
+                throw e
+            }
+        }
+    }
+
+    override suspend fun cheat(): JSONObject = withContext(Dispatchers.IO) {
+        executeSync(newRequest(endpoint("/cheat")).get().build())
+    }
+
+    override suspend fun updateCheat(fields: Map<String, Any>): JSONObject =
+        withContext(Dispatchers.IO) {
+            val body = JSONObject()
+            fields.forEach { (key, value) -> body.put(key, value) }
+            executeSync(newRequest(endpoint("/cheat")).post(jsonBody(body)).build())
+        }
+
     /** 流式分析一段文字描述。 */
     override suspend fun analyzeTextStream(
         text: String,

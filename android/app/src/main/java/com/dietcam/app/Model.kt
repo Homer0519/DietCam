@@ -9,7 +9,12 @@ data class Nutrition(
     val protein: Double = 0.0,
     val carbs: Double = 0.0,
     val fat: Double = 0.0,
+    /** 运动消耗（只有「当天合计」这一处有值）。 */
+    val burned: Double = 0.0,
 ) {
+    /** 净摄入 = 吃进去的 − 运动消耗的。 */
+    val net: Double get() = kcal - burned
+
     companion object {
         fun from(obj: JSONObject?): Nutrition {
             if (obj == null) return Nutrition()
@@ -18,10 +23,21 @@ data class Nutrition(
                 protein = obj.optDouble("protein_g", 0.0),
                 carbs = obj.optDouble("carbs_g", 0.0),
                 fat = obj.optDouble("fat_g", 0.0),
+                burned = obj.optDouble("burned_kcal", 0.0),
             )
         }
     }
 }
+
+/** 放纵日状态。下次日期与倒计时都是后端算好的，前端只负责显示。 */
+data class CheatStatus(
+    val enabled: Boolean = false,
+    val intervalDays: Int = 7,
+    val last: String = "",
+    val next: String = "",
+    val daysUntil: Int = 0,
+    val isToday: Boolean = false,
+)
 
 /** 一条饮食记录。 */
 data class MealRecord(
@@ -67,6 +83,19 @@ data class DaySummary(
 }
 
 object JsonParse {
+
+    fun cheat(obj: JSONObject?): CheatStatus {
+        val src = obj?.optJSONObject("cheat") ?: obj ?: return CheatStatus()
+        return CheatStatus(
+            enabled = src.optBoolean("enabled", false),
+            intervalDays = src.optInt("interval_days", 7),
+            last = src.optString("last"),
+            next = src.optString("next"),
+            daysUntil = src.optInt("days_until", 0),
+            isToday = src.optBoolean("is_today", false),
+        )
+    }
+
 
     fun record(obj: JSONObject): MealRecord {
         val items = mutableListOf<MealItem>()

@@ -261,6 +261,67 @@ fun main() {
         versionFromReleaseUrl("https://github.com/o/r/releases/latest") == null)
     check("空串返回 null", versionFromReleaseUrl("") == null)
 
+    section("16. 运动记录与放纵日（本地模式）")
+    // 手工塞一条运动记录：本地模式没有网络，运动分析没法在这里跑，
+    // 但「存进去之后汇总怎么算」是纯逻辑，必须验。
+    val exDay = "2026-09-18"
+    File(recDir, exDay + ".jsonl").writeText(
+        JSONObject()
+            .put("id", "ex1").put("date", exDay).put("time", "19:00")
+            .put("kind", "exercise").put("is_food", false).put("title", "慢跑")
+            .put("duration_min", 30).put("intensity", "medium").put("calories_burned", 320.0)
+            .put("calories_kcal", 0.0).put("protein_g", 0.0).put("carbs_g", 0.0).put("fat_g", 0.0)
+            .toString() + "\n" +
+            JSONObject()
+                .put("id", "m1").put("date", exDay).put("time", "12:00")
+                .put("kind", "meal").put("is_food", true).put("title", "牛肉面")
+                .put("calories_kcal", 600.0).put("protein_g", 30.0)
+                .put("carbs_g", 70.0).put("fat_g", 20.0)
+                .toString() + "\n",
+        Charsets.UTF_8,
+    )
+    val exTotals = run { api.summary(exDay) }.optJSONObject("totals")!!
+    check("摄入只算饮食那一条", close(exTotals.optDouble("calories_kcal"), 600.0), exTotals.optDouble("calories_kcal"))
+    check("消耗算运动那一条", close(exTotals.optDouble("burned_kcal"), 320.0), exTotals.optDouble("burned_kcal"))
+    check("净摄入 = 摄入 - 消耗", close(exTotals.optDouble("net_kcal"), 280.0), exTotals.optDouble("net_kcal"))
+    check("运动不会被算成吃进去的热量", exTotals.optDouble("calories_kcal") < 1000.0)
+
+    // ---- 放纵日 ----
+    val c0 = run { api.cheat() }.optJSONObject("cheat")!!
+    check("默认没开", c0.optBoolean("enabled") == false)
+    check("默认间隔 7 天", c0.optInt("interval_days") == 7)
+
+    val c1 = run { api.updateCheat(mapOf("enabled" to true, "interval_days" to 7, "done_today" to true)) }
+        .optJSONObject("cheat")!!
+    check("开启后 enabled 为真", c1.optBoolean("enabled"))
+    check("刚放纵过 → 今天不是放纵日", c1.optBoolean("is_today") == false)
+    check("倒计时 7 天", c1.optInt("days_until") == 7, c1.optInt("days_until"))
+
+    // 关键一条：把上次日期推到 7 天前，今天就应该正好到期。
+    // （Python 那边就是栽在这个日期正则上，Kotlin 这边一样要钉住）
+    val weekAgo = java.time.LocalDate.now().minusDays(7).toString()
+    val c2 = run { api.updateCheat(mapOf("last" to weekAgo)) }.optJSONObject("cheat")!!
+    check("正好到期时 is_today 为真", c2.optBoolean("is_today"), c2)
+    check("到期时倒计时为 0", c2.optInt("days_until") == 0, c2.optInt("days_until"))
+    check("last 真的写进去了", c2.optString("last") == weekAgo, c2.optString("last"))
+
+    val longAgo = java.time.LocalDate.now().minusDays(100).toString()
+    val c3 = run { api.updateCheat(mapOf("last" to longAgo)) }.optJSONObject("cheat")!!
+    check("过期很久也能推到今天或之后", c3.optInt("days_until", -1) >= 0, c3.optInt("days_until"))
+    check("下次日期不早于今天", c3.optString("next") >= java.time.LocalDate.now().toString(), c3.optString("next"))
+
+    check(
+        "间隔越界会被拒",
+        runCatching { run { api.updateCheat(mapOf("interval_days" to 999)) } }.isFailure,
+    )
+    check(
+        "非法日期会被拒",
+        runCatching { run { api.updateCheat(mapOf("last" to "不是日期")) } }.isFailure,
+    )
+
+    // summary 要顺带把放纵日状态带回来，省一次请求
+    check("summary 里带 cheat", run { api.summary(null) }.optJSONObject("cheat") != null)
+
     section("11. 本地模式不再依赖 baseUrl / secret")
     check("baseUrl 是空的（这就是本地模式的样子）", settings.baseUrl.isBlank())
     check("secret 是空的", settings.secret.isBlank())

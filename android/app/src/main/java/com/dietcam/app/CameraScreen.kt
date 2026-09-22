@@ -25,6 +25,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -113,6 +114,8 @@ fun CameraScreen(
     var frozen by remember { mutableStateOf<Bitmap?>(null) }
     var lensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var capture by remember { mutableStateOf<ImageCapture?>(null) }
+    // 输入框是记录饮食还是记录运动
+    var exerciseMode by remember { mutableStateOf(false) }
     var hasPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -215,9 +218,12 @@ fun CameraScreen(
                     note = note,
                     onNoteChange = { note = it },
                     onSendText = {
-                        vm.submitText(note)
+                        // 同一条输入框，按上面的切换决定记成饮食还是运动
+                        if (exerciseMode) vm.submitExercise(note) else vm.submitText(note)
                         note = ""
                     },
+                    exercise = exerciseMode,
+                    onToggleExercise = { exerciseMode = !exerciseMode },
                     onCapture = {
                         capturePicture(
                             context = context,
@@ -228,7 +234,10 @@ fun CameraScreen(
                             },
                         )
                     },
-                    onPick = { galleryLauncher.launch(Unit) },
+                    onPick = {
+                        exerciseMode = false
+                        galleryLauncher.launch(Unit)
+                    },
                 )
 
                 is CaptureUiState.Reviewing -> ReviewBar(
@@ -415,6 +424,24 @@ private fun PermissionPrompt(onGrant: () -> Unit) {
     }
 }
 
+@Composable
+private fun SegmentChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(Radii.sm))
+            .background(if (selected) Palette.Accent else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) Palette.OnAccent else Color.White.copy(alpha = 0.8f),
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        )
+    }
+}
+
 /** 取景态：输入框 + 相册 + 快门。 */
 @Composable
 private fun LiveBar(
@@ -424,6 +451,8 @@ private fun LiveBar(
     onSendText: () -> Unit,
     onCapture: () -> Unit,
     onPick: () -> Unit,
+    exercise: Boolean,
+    onToggleExercise: () -> Unit,
 ) {
     val canSend = note.isNotBlank()
     Column(
@@ -434,15 +463,36 @@ private fun LiveBar(
             .padding(horizontal = 14.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // 饮食 / 运动：同一条输入框，只换提示词和落库类型
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(Radii.sm))
+                .background(Color.White.copy(alpha = 0.10f))
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            SegmentChip("记录饮食", !exercise, onToggleExercise)
+            SegmentChip("记录运动", exercise, onToggleExercise)
+        }
+        Spacer(Modifier.height(10.dp))
         NoteField(
             value = note,
             onValueChange = onNoteChange,
-            placeholder = "也可以直接打字，例如：中午吃了一碗牛肉面",
+            placeholder = if (exercise) {
+                "例如：晚上慢跑了 5 公里"
+            } else {
+                "也可以直接打字，例如：中午吃了一碗牛肉面"
+            },
             onSend = onSendText,
             sendEnabled = canSend,
         )
         Text(
-            if (canSend) "按 ➤ 直接记录文字，或先拍照再带上这句话" else "拍照，或打字描述这一餐",
+            when {
+                exercise && canSend -> "按 ➤ 记录这次运动"
+                exercise -> "打字描述做了多久、什么强度，模型帮你估消耗"
+                canSend -> "按 ➤ 直接记录文字，或先拍照再带上这句话"
+                else -> "拍照，或打字描述这一餐"
+            },
             color = Color.White.copy(alpha = 0.72f),
             fontSize = 11.sp,
             modifier = Modifier.padding(top = 8.dp, bottom = 12.dp),

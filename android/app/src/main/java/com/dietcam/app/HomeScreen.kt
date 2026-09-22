@@ -24,11 +24,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +82,7 @@ fun HomeScreen(
                 state.summary != null -> {
                     val summary = state.summary!!
                     item { TodayCard(summary, vm) }
+            item { CheatCard(vm) }
                     item { SectionTitle("今日记录", summary.count) }
                     if (summary.records.isEmpty()) {
                         item { EmptyRecords(onOpenCamera) }
@@ -230,6 +237,15 @@ private fun TodayCard(summary: DaySummary, vm: DietViewModel) {
                         text = "共 " + summary.count + " 餐",
                         color = Palette.Info,
                     )
+                    // 有运动才显示这一行，免得平时多一行噪音
+                    if (summary.totals.burned > 0) {
+                        Spacer(Modifier.height(6.dp))
+                        Tag(
+                            text = "运动消耗 " + summary.totals.burned.roundToInt() +
+                                " 千卡 · 净摄入 " + summary.totals.net.roundToInt(),
+                            color = Palette.Protein,
+                        )
+                    }
                 }
             }
 
@@ -244,6 +260,132 @@ private fun TodayCard(summary: DaySummary, vm: DietViewModel) {
             }
         }
     }
+}
+
+/**
+ * 放纵日：主页只显示倒计时，点「设置」才展开。
+ * 下次日期与倒计时都是后端算好的，这里不做日期运算。
+ */
+@Composable
+private fun CheatCard(vm: DietViewModel) {
+    val cheat by vm.cheat.collectAsStateWithLifecycle()
+    var editing by remember { mutableStateOf(false) }
+    val c = cheat ?: return
+
+    Surface(
+        color = Palette.Surface,
+        shape = RoundedCornerShape(Radii.lg),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "放纵日",
+                    color = Palette.TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    when {
+                        !c.enabled -> "没开。开了以后每隔几天提醒你放松一次。"
+                        c.isToday -> "今天就是放纵日，放心吃 🎉"
+                        else -> "距离下次还有 " + c.daysUntil + " 天（" + c.next + "）"
+                    },
+                    color = if (c.enabled && c.isToday) Palette.Carbs else Palette.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = { editing = true }) {
+                Text(
+                    if (c.enabled) "设置" else "开启",
+                    color = Palette.Accent,
+                    fontSize = 13.sp,
+                )
+            }
+        }
+    }
+
+    if (editing) {
+        CheatDialog(vm, c) { editing = false }
+    }
+}
+
+@Composable
+private fun CheatDialog(vm: DietViewModel, c: CheatStatus, onClose: () -> Unit) {
+    var enabled by remember { mutableStateOf(c.enabled) }
+    var interval by remember { mutableStateOf(c.intervalDays.toString()) }
+
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("放纵日", fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column {
+                Text(
+                    "隔几天放纵一次。开启后主页会显示倒计时，到了那天也知道自己没跑偏。",
+                    color = Palette.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("开启", color = Palette.TextSecondary, fontSize = 13.sp)
+                    Spacer(Modifier.weight(1f))
+                    Switch(checked = enabled, onCheckedChange = { enabled = it })
+                }
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = interval,
+                    onValueChange = { text -> interval = text.filter { it.isDigit() }.take(2) },
+                    label = { Text("间隔天数（1-60）", fontSize = 12.sp) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(Radii.sm),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(6.dp))
+                TextButton(
+                    onClick = {
+                        vm.saveCheat(
+                            mapOf(
+                                "done_today" to true,
+                                "interval_days" to (interval.toIntOrNull() ?: 7),
+                            ),
+                        )
+                        onClose()
+                    },
+                ) {
+                    Text("今天放纵了，从现在重新计时", color = Palette.Accent, fontSize = 13.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    vm.saveCheat(
+                        mapOf(
+                            "enabled" to enabled,
+                            "interval_days" to (interval.toIntOrNull() ?: 7),
+                        ),
+                    )
+                    onClose()
+                },
+                shape = RoundedCornerShape(Radii.sm),
+                colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent),
+            ) {
+                Text("保存", color = Palette.OnAccent, fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onClose) {
+                Text("取消", color = Palette.TextSecondary)
+            }
+        },
+    )
 }
 
 @Composable

@@ -24,6 +24,32 @@ import java.util.concurrent.TimeUnit
 /** 孤儿照片的年龄保护窗口，与插件 main.py 的 SWEEP_MIN_AGE 对齐。 */
 private const val SWEEP_MIN_AGE_MS = 60_000L
 
+/** YYYY-MM-DD。注意这里是 Kotlin 字符串，反斜杠要写两个。 */
+private val DAY_PATTERN = Regex("\\d{4}-\\d{2}-\\d{2}")
+
+/**
+ * 运动分析的提示词（与插件端 EXERCISE_PROMPT 同口径）。
+ * 输出结构与饮食那份不同：只关心时长、强度和消耗。
+ */
+private val EXERCISE_PROMPT = """
+你是一位专业的运动与体能教练。用户用文字描述了自己做了什么运动，请估算时长、强度与热量消耗。
+
+输出格式**严格两行**：
+第一行：一句简短的中文观察，40 字以内，说明你如何理解这次运动。
+第二行：一个 JSON 对象（写成一行，不要换行，不要用 Markdown 代码块包裹）。
+
+JSON 结构如下：
+{"is_exercise":true,"title":"慢跑","duration_min":30,"intensity":"medium","calories_burned":320,"met":7.0,"confidence":0.7,"advice":"一句简短、具体、友善的建议"}
+
+要求：
+1. 描述里没有运动内容的，返回 {"is_exercise": false, "reason": "简短原因"}。
+2. calories_burned 是这次运动的净消耗（千卡），按「MET × 体重(kg) × 小时」估算；
+   用户没写体重时按 65kg 估，并在 confidence 里体现不确定性。
+3. duration_min 是分钟数；只说了距离就按常见配速折算，并在第一行写明按什么配速算的。
+4. intensity 只能是 low / medium / high 三选一。
+5. 第二行必须是能被 json.loads 直接解析的完整 JSON，前后不要有任何多余字符。
+""".trim()
+
 /**
  * 从 SSE 的一行里取出增量文本；不是「有内容」的行就返回 null。
  *
@@ -216,12 +242,18 @@ class LocalDietApi(
         return computeTargets(profileObject())
     }
 
+    /** 当天合计：吃进去的 + 运动消耗的 + 净摄入。字段与插件端保持一致。 */
     private fun totals(records: List<JSONObject>): JSONObject {
         var kcal = 0.0
         var protein = 0.0
         var carbs = 0.0
         var fat = 0.0
+        var burned = 0.0
         records.forEach { rec ->
+            if (rec.optString("kind", "meal") == "exercise") {
+                burned += rec.optDouble("calories_burned", 0.0)
+                return@forEach
+            }
             if (!rec.optBoolean("is_food", true)) return@forEach
             kcal += rec.optDouble("calories_kcal", 0.0)
             protein += rec.optDouble("protein_g", 0.0)
@@ -233,6 +265,8 @@ class LocalDietApi(
             .put("protein_g", round1(protein))
             .put("carbs_g", round1(carbs))
             .put("fat_g", round1(fat))
+            .put("burned_kcal", round1(burned))
+            .put("net_kcal", round1(kcal - burned))
     }
 
     // ------------------------------------------------------------ 接口
@@ -272,6 +306,7 @@ class LocalDietApi(
             .put("date", day)
             .put("totals", totals(records))
             .put("targets", targetsOf())
+            .put("cheat", cheatStatus())
             .put("count", records.size)
             .put("records", JSONArray(records))
     }
@@ -554,6 +589,111 @@ class LocalDietApi(
             record
         }
 
+    override suspend fun analyzeExerciseStream(
+        text: String,
+        onDelta: (String) -> Unit,
+    ): JSONObject = withContext(Dispatchers.IO) {
+        val now = calendarOf()
+        val day = dateOf(now)
+        val raw = callModel(null, buildExercisePrompt(text, now), onDelta)
+        val record = buildRecord(day, timeOf(now), "", parseModelJson(raw), "app-exercise", text)
+        appendRecord(day, record)
+        record
+    }
+
+    private fun buildExercisePrompt(text: String, now: Calendar): String {
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(now.time)
+        return EXERCISE_PROMPT + "\n\n当前时间：" + stamp + "。\n\n用户这次的运动：" + text
+    }
+
+    override suspend fun cheat(): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject().put("ok", true).put("cheat", cheatStatus())
+    }
+
+    override suspend fun updateCheat(fields: Map<String, Any>): JSONObject =
+        withContext(Dispatchers.IO) {
+            val state = loadState()
+            val cfg = JSONObject((state.optJSONObject("cheat") ?: JSONObject()).toString())
+            fields.forEach { (key, value) ->
+                when (key) {
+                    "enabled" -> cfg.put("enabled", value == true || value.toString() == "true")
+                    "done_today" -> if (value == true || value.toString() == "true") {
+                        // 「今天放纵了」→ 从现在起重新计时
+                        cfg.put("last", SimpleDateFormat("yyyy-MM-dd", Locale.US).format(calendarOf().time))
+                        cfg.put("enabled", true)
+                    }
+                    "interval_days" -> {
+                        val n = (value as? Number)?.toInt() ?: value.toString().toIntOrNull()
+                        if (n == null) throw DietApiException("interval_days 必须是数字")
+                        if (n < 1 || n > 60) throw DietApiException("interval_days 超出合理范围（1-60）")
+                        cfg.put("interval_days", n)
+                    }
+                    "last" -> {
+                        val text = value.toString()
+                        if (!DAY_PATTERN.matches(text)) throw DietApiException("last 格式应为 YYYY-MM-DD")
+                        cfg.put("last", text)
+                    }
+                }
+            }
+            state.put("cheat", cfg)
+            saveState(state)
+            JSONObject().put("ok", true).put("cheat", cheatStatus())
+        }
+
+    /**
+     * 与插件端同口径：只存「开关 + 间隔天数 + 上次放纵日」，
+     * 下次日期与倒计时都是算出来的 —— 不需要任何定时任务。
+     */
+    private fun cheatStatus(): JSONObject {
+        val state = loadState()
+        val cfg = state.optJSONObject("cheat") ?: JSONObject()
+        val enabled = cfg.optBoolean("enabled", false)
+        val interval = cfg.optInt("interval_days", 7).coerceIn(1, 60)
+
+        val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        // 注意：不要用「epoch 天数」做日期运算 —— 本地时区不是 UTC 时整体会偏一天
+        // （东八区实测：2026-09-15 会被算成 2026-09-14）。一律用本地日历按整天推进。
+        fun startOfDay(text: String?): Calendar {
+            val cal = Calendar.getInstance()
+            runCatching { fmt.parse(text ?: "") }.getOrNull()?.let { cal.time = it }
+            cal.set(Calendar.HOUR_OF_DAY, 0)
+            cal.set(Calendar.MINUTE, 0)
+            cal.set(Calendar.SECOND, 0)
+            cal.set(Calendar.MILLISECOND, 0)
+            return cal
+        }
+
+        val todayStart = startOfDay(fmt.format(calendarOf().time))
+        var lastStart = startOfDay(cfg.optString("last"))
+        // 用户手填的 last 可能比今天还晚，那样倒计时会算成负数，夹一下
+        if (lastStart.after(todayStart)) lastStart = startOfDay(fmt.format(calendarOf().time))
+
+        val next = lastStart.clone() as Calendar
+        var guard = 0
+        do {
+            next.add(Calendar.DAY_OF_YEAR, interval)
+            guard++
+        } while (next.before(todayStart) && guard < 1000)
+
+        // 按整天数，不用毫秒差 —— 免得夏令时那几天差一小时被截成差一天
+        var daysUntil = 0
+        val cursor = todayStart.clone() as Calendar
+        var steps = 0
+        while (cursor.before(next) && steps < 1000) {
+            cursor.add(Calendar.DAY_OF_YEAR, 1)
+            daysUntil++
+            steps++
+        }
+
+        return JSONObject()
+            .put("enabled", enabled)
+            .put("interval_days", interval)
+            .put("last", fmt.format(lastStart.time))
+            .put("next", fmt.format(next.time))
+            .put("days_until", daysUntil)
+            .put("is_today", enabled && daysUntil == 0)
+    }
+
     private fun archivePhoto(source: File, day: String): String {
         val dir = photosOf(day)
         dir.mkdirs()
@@ -607,10 +747,13 @@ class LocalDietApi(
         source: String,
         note: String,
     ): JSONObject {
-        val isFood = parsed.optBoolean("is_food", true)
+        // 运动与饮食共用同一个 records/<日期>.jsonl，只靠 kind 区分 ——
+        // 删除、编辑、日历、回忆这些现成逻辑都不用改。
+        val isExercise = parsed.optBoolean("is_exercise", false)
+        val isFood = parsed.optBoolean("is_food", true) && !isExercise
         val items = parsed.optJSONArray("items") ?: JSONArray()
         val title = parsed.optString("title").ifBlank {
-            if (isFood) "一餐" else parsed.optString("reason").ifBlank { "未识别到食物" }
+            if (isExercise) "运动" else if (isFood) "一餐" else parsed.optString("reason").ifBlank { "未识别到食物" }
         }
         return JSONObject()
             .put("id", UUID.randomUUID().toString().replace("-", "").take(12))
@@ -620,16 +763,21 @@ class LocalDietApi(
             .put("photo", photo)
             .put("source", source)
             .put("note", note.take(200))
+            .put("kind", if (isExercise) "exercise" else "meal")
             .put("is_food", isFood)
             .put("title", title.take(80))
-            .put("meal", parsed.optString("meal").ifBlank { guessMeal(Calendar.getInstance()) }.take(16))
-            .put("calories_kcal", round1(parsed.optDouble("calories_kcal", 0.0)))
-            .put("protein_g", round1(parsed.optDouble("protein_g", 0.0)))
-            .put("carbs_g", round1(parsed.optDouble("carbs_g", 0.0)))
-            .put("fat_g", round1(parsed.optDouble("fat_g", 0.0)))
+            .put("meal", if (isExercise) "" else parsed.optString("meal").ifBlank { guessMeal(Calendar.getInstance()) }.take(16))
+            .put("calories_kcal", if (isExercise) 0.0 else round1(parsed.optDouble("calories_kcal", 0.0)))
+            .put("protein_g", if (isExercise) 0.0 else round1(parsed.optDouble("protein_g", 0.0)))
+            .put("carbs_g", if (isExercise) 0.0 else round1(parsed.optDouble("carbs_g", 0.0)))
+            .put("fat_g", if (isExercise) 0.0 else round1(parsed.optDouble("fat_g", 0.0)))
             .put("confidence", round1(parsed.optDouble("confidence", 0.0)))
             .put("items", items)
             .put("advice", parsed.optString("advice").take(300))
+            .put("duration_min", round1(parsed.optDouble("duration_min", 0.0)))
+            .put("intensity", parsed.optString("intensity").take(16))
+            .put("calories_burned", round1(parsed.optDouble("calories_burned", 0.0)))
+            .put("met", round1(parsed.optDouble("met", 0.0)))
     }
 
     private fun parseModelJson(text: String): JSONObject {

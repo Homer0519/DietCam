@@ -107,7 +107,9 @@ print()
 # 第二个历史 bug：astrbot_provider 模式下把 _analyze() 的 dict 当元组解包
 # ---------------------------------------------------------------------------
 
-BAD_UNPACK = '''            result = await self._analyze(path, note)
+# 注意：这里要跟 main.py 里 _stream_model 的实际写法保持同步
+# （加运动模块时它多了个 exercise 参数，脚本没跟上就会报「找不到代码块」）
+BAD_UNPACK = '''            result = await self._analyze(path, note, exercise=exercise)
             yield ("meta", str(result.get("_engine") or mode))
             clean = {
                 key: value
@@ -116,7 +118,7 @@ BAD_UNPACK = '''            result = await self._analyze(path, note)
             }
             yield ("delta", json.dumps(clean, ensure_ascii=False))
             return'''
-OLD_UNPACK = '''            text, engine = await self._analyze(path, note)
+OLD_UNPACK = '''            text, engine = await self._analyze(path, note, exercise=exercise)
             yield ("meta", engine)
             yield ("delta", json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else str(text))
             return'''

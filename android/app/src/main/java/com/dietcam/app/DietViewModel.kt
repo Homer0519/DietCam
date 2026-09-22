@@ -272,6 +272,8 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
                     refreshing = false,
                     summary = JsonParse.summary(json),
                 )
+                // /summary 顺带带回了放纵日状态，不用再多一次请求
+                json.optJSONObject("cheat")?.let { _cheat.value = JsonParse.cheat(it) }
             } catch (e: Exception) {
                 _home.value = _home.value.copy(
                     loading = false,
@@ -367,6 +369,41 @@ class DietViewModel(app: Application) : AndroidViewModel(app) {
         }
         startAnalyze(state.file, note) { api, onDelta ->
             api.analyzeStream(state.file, note, onDelta)
+        }
+    }
+
+    /** 纯文字记录一次运动：走同一套流程，只是换成运动提示词。 */
+    fun submitExercise(text: String) {
+        val desc = text.trim()
+        if (desc.isEmpty()) return
+        if (!store.isConfigured()) {
+            _capture.value = CaptureUiState.Failed(notReadyMessage())
+            return
+        }
+        startAnalyze(null, desc) { api, onDelta ->
+            api.analyzeExerciseStream(desc, onDelta)
+        }
+    }
+
+    // -------------------------------------------------------------- 放纵日
+
+    private val _cheat = MutableStateFlow<CheatStatus?>(null)
+    val cheat: StateFlow<CheatStatus?> = _cheat.asStateFlow()
+
+    /** 改放纵日设置：enabled / interval_days / done_today / last。 */
+    fun saveCheat(fields: Map<String, Any>) {
+        if (!store.isConfigured()) {
+            _notice.value = Notice("还没配置好", notReadyMessage())
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val json = dietBackend(getApplication<Application>(), store.snapshot())
+                    .updateCheat(fields)
+                _cheat.value = JsonParse.cheat(json)
+            } catch (e: Exception) {
+                _notice.value = Notice("保存放纵日失败", DietApi.friendlyMessage(e))
+            }
         }
     }
 

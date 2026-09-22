@@ -238,10 +238,27 @@ plugin.config.pop("extra_headers", None)
 
 # ================================================================ 9. 端到端：文件上传（回归）
 section("9. 端到端 · 照片上传（线上 bug 的回归测试）")
-check("路由已注册", len(context.routes()) == 18, context.routes())
+# 把路由表整个列出来比对：少一条、多一条都会红，比只数数量有用
+EXPECTED_ROUTES = {
+    "/health", "/analyze", "/analyze_text", "/analyze_stream", "/analyze_text_stream",
+    "/summary", "/targets", "/profile", "/record/update", "/record/delete",
+    "/record/reanalyze", "/exercise", "/exercise_stream", "/cheat",
+    "/calendar", "/history", "/archive", "/records", "/photo", "/cleanup",
+}
+actual_routes = {r[len("/astrbot_plugin_diet"):] for r in set(context.routes())}
+check(
+    "路由表与预期完全一致（多一条少一条都算错）",
+    actual_routes == EXPECTED_ROUTES,
+    sorted(actual_routes ^ EXPECTED_ROUTES),
+)
 check(
     "包含孤儿照片清理路由",
     any(r.endswith("/cleanup") for r in context.routes()),
+    context.routes(),
+)
+check(
+    "包含运动与放纵日路由",
+    all(any(r.endswith(s) for r in context.routes()) for s in ("/exercise", "/exercise_stream", "/cheat")),
     context.routes(),
 )
 patch_analyzer()
@@ -469,7 +486,8 @@ PIECES = ["盘中是炒饭、鸡蛋和虾仁",
 
 
 def patch_stream(pieces=None, fail=None, meta="openai:stream-test"):
-    async def gen(path, note):
+    # 注意签名要和真实 _stream_model 对齐（多出来的 exercise 参数）
+    async def gen(path, note, exercise=False):
         if fail:
             raise RuntimeError(fail)
         yield ("meta", meta)
@@ -1052,6 +1070,106 @@ check("照片目录里也没有 .tmp 残渣", list(plugin.photo_dir.rglob("*.tmp
 plugin._save_state(plugin._load_state())
 check("写 state.json 也走原子写，不留 .tmp",
       not plugin._state_file().with_name(plugin._state_file().name + ".tmp").exists())
+
+# ================================================================ 26. 运动与放纵日
+section("26. 运动记录与放纵日倒计时")
+
+async def fake_exercise_analyze(path_=None, note="", exercise=False, **kw):
+    # 只有走运动那条路才返回运动结构；否则说明调用方忘了传 exercise
+    if not exercise:
+        return {"is_food": True, "title": "不该走这里", "calories_kcal": 1}
+    return {
+        "is_exercise": True, "title": "慢跑", "duration_min": 30, "intensity": "medium",
+        "calories_burned": 320, "met": 7.0, "confidence": 0.7, "advice": "跑后拉伸十分钟",
+    }
+
+plugin._analyze = fake_exercise_analyze
+today = module.DietPlugin._today(plugin)
+
+make_request(payload={"text": "晚上慢跑了 5 公里"})
+resp = call("/exercise", "POST")
+check("运动记录返回 200", resp.status_code == 200, resp.payload)
+ex = resp.payload.get("record", {})
+check("kind 标成 exercise", ex.get("kind") == "exercise", ex.get("kind"))
+check("算出消耗热量", ex.get("calories_burned") == 320, ex.get("calories_burned"))
+check("记下时长", ex.get("duration_min") == 30, ex.get("duration_min"))
+check("记下强度", ex.get("intensity") == "medium")
+check("运动不带摄入热量", ex.get("calories_kcal") == 0, ex.get("calories_kcal"))
+check("is_food 标成假（不会被算进吃进去的热量）", ex.get("is_food") is False)
+check("来源标成 app-exercise", ex.get("source") == "app-exercise")
+
+make_request(payload={})
+resp = call("/exercise", "POST")
+check("缺 text 被拒绝", resp.status_code == 400, resp.payload)
+
+# 汇总：摄入与消耗必须分开算
+plugin._analyze = module.DietPlugin._totals  # 占位，下面立刻换回来
+make_request()
+sresp = call("/summary")
+check("summary 返回 200", sresp.status_code == 200, sresp.payload)
+totals = sresp.payload.get("totals", {})
+check("summary 带 burned_kcal", "burned_kcal" in totals, list(totals))
+check("summary 带 net_kcal", "net_kcal" in totals, list(totals))
+check("消耗被算进当天", totals.get("burned_kcal", 0) >= 320, totals.get("burned_kcal"))
+check(
+    "净摄入 = 摄入 - 消耗",
+    abs(totals.get("net_kcal", 0) - (totals.get("calories_kcal", 0) - totals.get("burned_kcal", 0))) < 0.2,
+    totals,
+)
+ex_list = [r for r in sresp.payload.get("records", []) if r.get("kind") == "exercise"]
+check("运动记录出现在当天列表里", len(ex_list) == 1, len(ex_list))
+
+# 日历也要带消耗
+make_request(query={"month": today[:7]})
+mresp = call("/calendar")
+check("日历带 burned_kcal", "burned_kcal" in mresp.payload.get("days", {}).get(today, {}),
+      mresp.payload.get("days", {}).get(today, {}))
+
+# 删除走的是同一套逻辑，不用为运动单开一条
+make_request(payload={"date": today, "id": ex.get("id")})
+dresp = call("/record/delete", "POST")
+check("运动记录能删掉", dresp.status_code == 200 and dresp.payload.get("ok"), dresp.payload)
+
+# ---- 放纵日 ----
+make_request(payload={"enabled": True, "interval_days": 7, "done_today": True})
+resp = call("/cheat", "POST")
+ch = resp.payload.get("cheat", {})
+check("放纵日返回 200", resp.status_code == 200, resp.payload)
+check("开关已打开", ch.get("enabled") is True, ch)
+check("间隔记成 7 天", ch.get("interval_days") == 7)
+check("刚放纵过 → 今天不是放纵日", ch.get("is_today") is False, ch)
+check("倒计时 7 天", ch.get("days_until") == 7, ch.get("days_until"))
+
+# 把「上次放纵日」推到 7 天前，今天就应该正好是放纵日
+week_ago = (dt.date.fromisoformat(today) - dt.timedelta(days=7)).isoformat()
+make_request(payload={"last": week_ago})
+ch = call("/cheat", "POST").payload.get("cheat", {})
+check("正好到期时 is_today 为真", ch.get("is_today") is True, ch)
+check("到期时倒计时为 0", ch.get("days_until") == 0, ch.get("days_until"))
+
+# 早就过期也要能推到未来，不能算出负数
+long_ago = (dt.date.fromisoformat(today) - dt.timedelta(days=100)).isoformat()
+make_request(payload={"last": long_ago})
+ch = call("/cheat", "POST").payload.get("cheat", {})
+check("过期很久也能推到今天或之后", ch.get("days_until", -1) >= 0, ch)
+check("下次日期不早于今天", ch.get("next", "") >= today, ch.get("next"))
+
+make_request(payload={"interval_days": 999})
+resp = call("/cheat", "POST")
+check("间隔越界被拒绝", resp.status_code == 400, resp.payload)
+make_request(payload={"interval_days": "很久"})
+resp = call("/cheat", "POST")
+check("间隔非数字被拒绝", resp.status_code == 400, resp.payload)
+make_request(payload={"last": "不是日期"})
+resp = call("/cheat", "POST")
+check("非法日期被拒绝", resp.status_code == 400, resp.payload)
+
+make_request()
+check("GET /cheat 也能读", call("/cheat", "GET").payload.get("cheat", {}).get("interval_days") == 7)
+
+stub.set_request(module, stub.PluginRequest(headers={}))
+resp = asyncio.run(context.handler_for("/exercise", "POST")())
+check("运动接口需要鉴权", resp.status_code == 400 and resp.payload["message"] == "unauthorized")
 
 # ================================================================ 结果
 print()

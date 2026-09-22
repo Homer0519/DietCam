@@ -27,6 +27,15 @@ interface DietBackend {
 
     suspend fun analyzeTextStream(text: String, onDelta: (String) -> Unit): JSONObject
 
+    /** 流式记录一次运动（纯文字描述，模型负责估时长与消耗）。 */
+    suspend fun analyzeExerciseStream(text: String, onDelta: (String) -> Unit): JSONObject
+
+    /** 读放纵日设置（下次日期与倒计时由后端算好）。 */
+    suspend fun cheat(): JSONObject
+
+    /** 改放纵日设置：enabled / interval_days / done_today / last。 */
+    suspend fun updateCheat(fields: Map<String, Any>): JSONObject
+
     suspend fun photoBytes(date: String, name: String): ByteArray
 
     /**

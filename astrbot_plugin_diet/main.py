@@ -59,7 +59,7 @@ except Exception:  # pragma: no cover - 兼容旧版本
 
 
 PLUGIN_NAME = "astrbot_plugin_diet"
-PLUGIN_VERSION = "1.3.2"
+PLUGIN_VERSION = "1.3.3"
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_TEXT_CHARS = 2000
 ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
@@ -201,6 +201,26 @@ JSON 结构如下：
 4. 第二行必须是**能被 json.loads 直接解析**的完整 JSON，前后不要有任何多余字符。"""
 
 
+EXERCISE_PROMPT = """你是一位专业的运动与体能教练。用户没有拍照，而是用文字描述了自己做了什么运动。请据此估算这次运动的时长、强度与热量消耗。
+
+输出格式**严格两行**：
+第一行：一句简短的中文观察，40 字以内，说明你如何理解这次运动，例如"按 6:00/km 的配速估算，5 公里大约跑了 30 分钟"。
+第二行：一个 JSON 对象（写成一行，不要换行，不要用 Markdown 代码块包裹）。
+
+JSON 结构如下：
+{"is_exercise":true,"title":"慢跑","duration_min":30,"intensity":"medium","calories_burned":320,"met":7.0,"confidence":0.7,"advice":"一句简短、具体、友善的建议"}
+
+要求：
+1. 描述里没有运动内容的，返回 {"is_exercise": false, "reason": "简短原因"}。
+2. calories_burned 是这次运动的**净消耗**（千卡），按「MET × 体重(kg) × 小时」的常见口径估算；
+   用户没写体重时按 65kg 估，并在 confidence 里体现不确定性。
+3. duration_min 是分钟数。用户只说了距离（例如"跑了 5 公里"）就按常见配速折算成时长，
+   并在第一行里写明你按什么配速算的。
+4. intensity 只能是 low / medium / high 三选一。
+5. advice 要具体（例如"力量训练后 30 分钟内补一份蛋白质，恢复更快"），不要说空话。
+6. 第二行必须是**能被 json.loads 直接解析**的完整 JSON，前后不要有任何多余字符。"""
+
+
 def _pick(mapping: Any, key: str, default: Any = None) -> Any:
     """从请求的映射对象里安全取值。
 
@@ -301,6 +321,19 @@ class DietPlugin(Star):
                 ["POST"],
                 "re-analyze one record with the model",
             ),
+            (
+                prefix + "/exercise",
+                self.api_exercise,
+                ["POST"],
+                "log one workout from a typed description",
+            ),
+            (
+                prefix + "/exercise_stream",
+                self.api_exercise_stream,
+                ["POST"],
+                "log one workout, streamed as SSE",
+            ),
+            (prefix + "/cheat", self.api_cheat, ["GET", "POST"], "cheat-day schedule"),
             (prefix + "/calendar", self.api_calendar, ["GET"], "per-day totals for a month"),
             (prefix + "/history", self.api_history, ["GET"], "recent records timeline"),
             (prefix + "/archive", self.api_archive, ["POST"], "archive a photo (base64)"),
@@ -377,13 +410,69 @@ class DietPlugin(Star):
         return out
 
     def _totals(self, records: list[dict]) -> dict:
-        acc = {"calories_kcal": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
+        """当天合计：吃进去的 + 运动消耗的 + 净摄入。
+
+        运动记录不带营养，只有 calories_burned；两者都放在同一个文件里，
+        所以这里必须按 kind 分开算。
+        """
+        acc = {
+            "calories_kcal": 0.0,
+            "protein_g": 0.0,
+            "carbs_g": 0.0,
+            "fat_g": 0.0,
+            "burned_kcal": 0.0,
+        }
         for rec in records:
+            if str(rec.get("kind") or "meal") == "exercise":
+                acc["burned_kcal"] += _f(rec.get("calories_burned"))
+                continue
             if not rec.get("is_food", True):
                 continue
-            for key in acc:
+            for key in ("calories_kcal", "protein_g", "carbs_g", "fat_g"):
                 acc[key] += _f(rec.get(key))
-        return {k: round(v, 1) for k, v in acc.items()}
+        out = {k: round(v, 1) for k, v in acc.items()}
+        out["net_kcal"] = round(out["calories_kcal"] - out["burned_kcal"], 1)
+        return out
+
+    def _cheat_status(self) -> dict:
+        """放纵日：只存「开关 + 间隔天数 + 上次放纵日」，下次日期与倒计时都是算出来的。
+
+        这样不需要任何定时任务，改配置立刻生效，也不会出现「定时器没跑」这类问题。
+        """
+        state = self._load_state()
+        raw = state.get("cheat")
+        cfg = dict(raw) if isinstance(raw, dict) else {}
+        enabled = bool(cfg.get("enabled", False))
+        try:
+            interval = int(cfg.get("interval_days") or 7)
+        except (TypeError, ValueError):
+            interval = 7
+        interval = max(1, min(interval, 60))
+
+        today = dt.date.fromisoformat(self._today())
+        last_text = str(cfg.get("last") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", last_text):
+            last_text = today.isoformat()
+        try:
+            last_date = dt.date.fromisoformat(last_text)
+        except ValueError:
+            last_date = today
+
+        # 下次 = 上次 + 间隔；已经过去就一直往后推，直到落在今天或之后
+        nxt = last_date + dt.timedelta(days=interval)
+        guard = 0
+        while nxt < today and guard < 1000:
+            nxt += dt.timedelta(days=interval)
+            guard += 1
+        days_until = (nxt - today).days
+        return {
+            "enabled": enabled,
+            "interval_days": interval,
+            "last": last_date.isoformat(),
+            "next": nxt.isoformat(),
+            "days_until": days_until,
+            "is_today": enabled and days_until == 0,
+        }
 
     def _safe_photo(self, day: str, name: str) -> Path | None:
         if not day or not name:
@@ -394,6 +483,14 @@ class DietPlugin(Star):
         if clean != name or not clean:
             return None
         return self.photo_dir / day / clean
+
+    def _prompt_for(self, path: Path | None, exercise: bool = False) -> str:
+        """按场景挑提示词。三套：看图、看文字、看运动的文字描述。"""
+        if exercise:
+            return str(self.config.get("analyze_prompt_exercise") or "").strip() or EXERCISE_PROMPT
+        if path is None:
+            return str(self.config.get("analyze_prompt_text") or "").strip() or TEXT_PROMPT
+        return str(self.config.get("analyze_prompt") or "").strip() or DEFAULT_PROMPT
 
     def _time_hint(self) -> str:
         """把「现在几点」告诉模型。
@@ -666,17 +763,16 @@ class DietPlugin(Star):
 
     # ------------------------------------------------------------------ 分析
 
-    async def _analyze(self, path: Path | None = None, note: str = "") -> dict:
+    async def _analyze(
+        self, path: Path | None = None, note: str = "", exercise: bool = False
+    ) -> dict:
         """分析一餐。
 
         path 为 None 时表示纯文字模式（用户直接打字描述吃了什么）；
         否则以照片为主，note 作为补充说明一起交给模型。
         """
         mode = str(self.config.get("llm_mode") or "openai_compatible")
-        if path is None:
-            prompt = str(self.config.get("analyze_prompt_text") or "").strip() or TEXT_PROMPT
-        else:
-            prompt = str(self.config.get("analyze_prompt") or "").strip() or DEFAULT_PROMPT
+        prompt = self._prompt_for(path, exercise=exercise)
         note = (note or "").strip()
         if note:
             prompt = prompt + "\n\n用户的补充说明：" + note
@@ -790,17 +886,14 @@ class DietPlugin(Star):
         text = getattr(resp, "completion_text", "") or ""
         return str(text), "astrbot:" + provider_id
 
-    async def _stream_model(self, path: Path | None, note: str = ""):
+    async def _stream_model(self, path: Path | None, note: str = "", exercise: bool = False):
         """异步生成器，逐段产出模型输出。
 
         只在 openai_compatible 模式下做真正的增量读取；
         astrbot_provider 模式拿不到流式接口，退化为一次性产出（内容不变，只是不分段）。
         """
         mode = str(self.config.get("llm_mode") or "openai_compatible")
-        if path is None:
-            prompt = str(self.config.get("analyze_prompt_text") or "").strip() or TEXT_PROMPT
-        else:
-            prompt = str(self.config.get("analyze_prompt") or "").strip() or DEFAULT_PROMPT
+        prompt = self._prompt_for(path, exercise=exercise)
         note = (note or "").strip()
         if note:
             prompt = prompt + "\n\n用户的补充说明：" + note
@@ -811,7 +904,7 @@ class DietPlugin(Star):
             # 注意：_analyze() 返回的是 dict，不能当元组解包
             # （曾经写成 text, engine = await self._analyze(...)，
             #  在 astrbot_provider 模式下会抛 "too many values to unpack"）
-            result = await self._analyze(path, note)
+            result = await self._analyze(path, note, exercise=exercise)
             yield ("meta", str(result.get("_engine") or mode))
             clean = {
                 key: value
@@ -898,10 +991,19 @@ class DietPlugin(Star):
         source: str = "app",
         note: str = "",
     ) -> dict:
-        is_food = bool(result.get("is_food", True))
+        # 运动记录和饮食记录放在同一个 jsonl 里，只靠 kind 区分 ——
+        # 这样删除、编辑、日历、回忆这些现成的逻辑一行都不用改。
+        is_exercise = bool(result.get("is_exercise"))
+        is_food = bool(result.get("is_food", True)) and not is_exercise
         items = result.get("items")
         if not isinstance(items, list):
             items = []
+        if is_exercise:
+            title = str(result.get("title") or "运动")[:80]
+            meal = ""
+        else:
+            title = str(result.get("title") or result.get("reason") or ("未识别到食物" if not is_food else "一餐"))[:80]
+            meal = str(result.get("meal") or self._guess_meal(moment))[:16]
         return {
             "id": uuid.uuid4().hex[:12],
             "date": day,
@@ -910,17 +1012,24 @@ class DietPlugin(Star):
             "photo": photo_name,
             "source": source,
             "note": str(note or "")[:200],
+            "kind": "exercise" if is_exercise else "meal",
             "is_food": is_food,
-            "title": str(result.get("title") or result.get("reason") or ("未识别到食物" if not is_food else "一餐"))[:80],
-            "meal": str(result.get("meal") or self._guess_meal(moment))[:16],
-            "calories_kcal": _f(result.get("calories_kcal")),
-            "protein_g": _f(result.get("protein_g")),
-            "carbs_g": _f(result.get("carbs_g")),
-            "fat_g": _f(result.get("fat_g")),
+            "title": title,
+            "meal": meal,
+            # 运动不谈摄入，这几项一律留 0，免得旧代码把它们算进当天吃进去的热量
+            "calories_kcal": 0.0 if is_exercise else _f(result.get("calories_kcal")),
+            "protein_g": 0.0 if is_exercise else _f(result.get("protein_g")),
+            "carbs_g": 0.0 if is_exercise else _f(result.get("carbs_g")),
+            "fat_g": 0.0 if is_exercise else _f(result.get("fat_g")),
             "confidence": _f(result.get("confidence")),
             "items": items,
             "advice": str(result.get("advice") or "")[:300],
             "engine": str(result.get("_engine") or ""),
+            # 运动专属字段（饮食记录里恒为 0 / 空）
+            "duration_min": _f(result.get("duration_min")),
+            "intensity": str(result.get("intensity") or "")[:16],
+            "calories_burned": _f(result.get("calories_burned")),
+            "met": _f(result.get("met")),
         }
 
     # -------------------------------------------------------------- Web API
@@ -946,6 +1055,9 @@ class DietPlugin(Star):
                     "history": True,
                     "text": True,
                     "archive": True,
+                    "exercise": True,
+                    "exercise_stream": bool(WEB_API and stream_response is not None),
+                    "cheat": True,
                 },
                 "targets": self._targets(),
             }
@@ -1026,7 +1138,9 @@ class DietPlugin(Star):
         logger.info("[diet] 已记录文字饮食：%s（%s kcal）", text[:30], record["calories_kcal"])
         return json_response({"ok": True, "record": record})
 
-    async def _stream_analyze(self, path, note, day, photo_name, source, moment):
+    async def _stream_analyze(
+        self, path, note, day, photo_name, source, moment, exercise: bool = False
+    ):
         """流式分析的 SSE 事件序列：start -> meta* -> delta* -> done|error。
 
         照片在上游已经落盘了，所以这里的每条失败路径都必须把它删掉，
@@ -1036,7 +1150,7 @@ class DietPlugin(Star):
         buf: list[str] = []
         engine = ""
         try:
-            async for kind, value in self._stream_model(path, note):
+            async for kind, value in self._stream_model(path, note, exercise=exercise):
                 if kind == "meta":
                     engine = str(value)
                     yield self._sse({"type": "meta", "engine": engine})
@@ -1134,6 +1248,109 @@ class DietPlugin(Star):
         return stream_response(
             self._stream_analyze(None, text, day, "", "app-text", moment)
         )
+
+    # ------------------------------------------------------------ 运动记录
+
+    async def api_exercise(self):
+        """纯文字记录一次运动：走同一套模型调用，只是换成运动提示词。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+        text = str(_pick(payload, "text", "") or "").strip()
+        if not text:
+            return error_response("缺少 text")
+        if len(text) > MAX_TEXT_CHARS:
+            return error_response("文字过长（上限 %d 字）" % MAX_TEXT_CHARS)
+
+        moment = dt.datetime.now(self.tz)
+        day = moment.strftime("%Y-%m-%d")
+        result = await self._analyze(None, note=text, exercise=True)
+        record = self._build_record(
+            moment, day, "", result, source="app-exercise", note=text
+        )
+        self._append_record(day, record)
+        logger.info(
+            "[diet] 已记录运动：%s（%s kcal）", text[:30], record["calories_burned"]
+        )
+        return json_response({"ok": True, "record": record})
+
+    async def api_exercise_stream(self):
+        """与 /exercise 相同，但以 SSE 逐步返回模型输出。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+        if not WEB_API or stream_response is None:
+            return error_response("当前 AstrBot 版本不支持流式响应")
+        payload = await request.json(default={})
+        if not hasattr(payload, "get"):
+            payload = {}
+        text = str(_pick(payload, "text", "") or "").strip()
+        if not text:
+            return error_response("缺少 text")
+        if len(text) > MAX_TEXT_CHARS:
+            return error_response("文字过长（上限 %d 字）" % MAX_TEXT_CHARS)
+
+        moment = dt.datetime.now(self.tz)
+        day = moment.strftime("%Y-%m-%d")
+        return stream_response(
+            self._stream_analyze(None, text, day, "", "app-exercise", moment, exercise=True)
+        )
+
+    # -------------------------------------------------------------- 放纵日
+
+    async def api_cheat(self):
+        """放纵日设置：读 / 写间隔与上次日期，下次日期由服务端实时算。"""
+        if not self._authorized():
+            return error_response("unauthorized")
+
+        payload: dict = {}
+        try:
+            body = await request.json(default={})
+            if hasattr(body, "get"):
+                payload = body
+        except Exception:  # noqa: BLE001 - GET 没有请求体时不该报错
+            payload = {}
+
+        state = self._load_state()
+        raw = state.get("cheat")
+        cfg = dict(raw) if isinstance(raw, dict) else {}
+        changed = False
+
+        enabled = _pick(payload, "enabled", None)
+        if enabled is not None:
+            cfg["enabled"] = bool(enabled)
+            changed = True
+
+        interval = _pick(payload, "interval_days", None)
+        if interval not in (None, ""):
+            try:
+                value = int(interval)
+            except (TypeError, ValueError):
+                return error_response("interval_days 必须是数字")
+            if not (1 <= value <= 60):
+                return error_response("interval_days 超出合理范围（1-60）")
+            cfg["interval_days"] = value
+            changed = True
+
+        # 「今天放纵了」→ 从现在起重新计时并自动打开开关
+        if _pick(payload, "done_today", None):
+            cfg["last"] = self._today()
+            cfg["enabled"] = True
+            changed = True
+
+        last = _pick(payload, "last", None)
+        if last not in (None, ""):
+            text = str(last)
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                return error_response("last 格式应为 YYYY-MM-DD")
+            cfg["last"] = text
+            changed = True
+
+        if changed:
+            state["cheat"] = cfg
+            self._save_state(state)
+        return json_response({"ok": True, "cheat": self._cheat_status()})
 
     async def api_profile(self):
         """读取身体档案与推算出来的目标。"""
@@ -1403,6 +1620,8 @@ class DietPlugin(Star):
                 "protein_g": totals["protein_g"],
                 "carbs_g": totals["carbs_g"],
                 "fat_g": totals["fat_g"],
+                "burned_kcal": totals["burned_kcal"],
+                "net_kcal": totals["net_kcal"],
                 "count": len(records),
             }
         return json_response({"ok": True, "month": month, "targets": self._targets(), "days": days})
@@ -1465,6 +1684,7 @@ class DietPlugin(Star):
                 "count": len(records),
                 "totals": self._totals(records),
                 "targets": self._targets(),
+                "cheat": self._cheat_status(),
                 "records": records,
             }
         )
