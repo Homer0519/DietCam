@@ -188,10 +188,15 @@ fun main() {
     val cal = run { api.calendar("2026-09") }
     check("日历包含这一天", cal.optJSONObject("days")!!.has(day), cal.optJSONObject("days")!!.keys().asSequence().toList())
     check("日历这天 2 条", cal.optJSONObject("days")!!.getJSONObject(day).optInt("count") == 2)
-    val hist = run { api.history(7, null) }
+    // 范围必须显式给 end。之前这里传 null（意思是「到今天」），而记录固定塞在
+    // 2026-09-17 —— 日子一过，7 天窗口就滑过了它，测试自己会过期（2026-10-07 实测红了）。
+    val hist = run { api.history(7, day) }
     check("历史记录 2 条", hist.optInt("count") == 2, hist.optInt("count"))
     check("history 的 days 参数生效", hist.optInt("days") == 7, hist.optInt("days"))
-    check("history 带上 end（与插件返回结构一致）", hist.optString("end").isNotBlank(), hist.optString("end"))
+    check("history 带上 end（与插件返回结构一致）", hist.optString("end") == day, hist.optString("end"))
+    // 「不传 end 就取今天」这条默认行为单独钉住，但只断言日期，不依赖 fixture 落在窗口里
+    val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+    check("history 不传 end 时默认到今天", run { api.history(1, null) }.optString("end") == today, today)
     check("history 带上 targets", hist.optJSONObject("targets") != null)
     check("history 的 records 数组 2 条", hist.optJSONArray("records")!!.length() == 2)
 

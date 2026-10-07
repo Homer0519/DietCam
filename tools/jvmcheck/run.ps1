@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 # 本地模式数据层自检：把**真实的** LocalDietApi 放到普通 JVM 上编译并运行。
 #

@@ -40,3 +40,6 @@ dist/*.bundle
 android/keystore/*.jks
 android/keystore/*.keystore
 android/keystore.properties
+
+# 代码走查记录：里面有明文密钥库口令，只在本地留档，绝不入库。
+*代码走查*.md
